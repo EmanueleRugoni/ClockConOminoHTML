@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tempo Reale — l'omino che disegna i minuti</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕰️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;1,9..144,300&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 75% 80% at 50% 46%, rgba(0,0,0,0) 58%, rgba(0,0,0,.42) 100%);
+  }
+  #hud {
+    position: fixed; left: calc(18px + env(safe-area-inset-left, 0px)); bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    font-family: "Fraunces", Georgia, "Times New Roman", serif; font-weight: 300;
+    color: #f4ecdc; text-shadow: 0 1px 8px rgba(0,0,0,.55);
+    transition: opacity .8s ease; pointer-events: none; line-height: 1.25;
+  }
+  #hud.hidden { opacity: 0; }
+  #hud .temp { font-size: 34px; letter-spacing: -.01em; }
+  #hud .cond { font-size: 16px; font-style: italic; opacity: .92; }
+  #hud .meta { font-size: 12.5px; opacity: .7; margin-top: 2px; }
+  #help {
+    position: fixed; right: 18px; bottom: 14px; max-width: 280px;
+    font: 300 13px/1.5 "Fraunces", Georgia, serif; color: #f4ecdc;
+    background: rgba(12,14,20,.55); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(244,236,220,.18); border-radius: 10px; padding: 12px 14px;
+    opacity: 0; transition: opacity .4s ease; pointer-events: none;
+  }
+  #help.show { opacity: 1; }
+  #help b { font-weight: 300; font-style: italic; }
+  @media (prefers-reduced-motion: reduce) { #hud, #help { transition: none; } }
+</style>
+</head>
+<body>
+<div id="vignette"></div>
+<div id="hud">
+  <div class="temp" id="wTemp">--°</div>
+  <div class="cond" id="wCond">Sto leggendo il meteo…</div>
+  <div class="meta" id="wMeta"></div>
+</div>
+<div id="help">
+  <b>Tasti</b><br>
+  1 sereno, 2 nuvoloso, 3 pioggia, 4 temporale, 5 neve, 6 nebbia, 0 meteo reale<br>
+  G giornata accelerata, H mostra o nasconde il meteo, ? questo aiuto
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+/* =====================================================================
+   CONFIGURAZIONE  (tutto modificabile anche da URL, es. ?lat=45.6&lon=9.37&hud=0&q=low)
+   ===================================================================== */
+const P = new URLSearchParams(location.search);
+const num = (k, d) => { const v = parseFloat(P.get(k)); return Number.isFinite(v) ? v : d; };
+const CONFIG = {
+  lat: num('lat', 45.6127),          // Vimercate (MB) — cambia qui o via ?lat=&lon=
+  lon: num('lon', 9.3686),
+  useGeolocation: P.get('geo') === '1', // ?geo=1 per usare la posizione del browser
+  weatherRefreshMin: 10,
+  quality: P.get('q') === 'low' ? 'low' : 'high',
+  showHud: P.get('hud') !== '0',
+  forcedWeather: P.get('meteo'),      // sereno | nuvoloso | pioggia | temporale | neve | nebbia
+  daySpeed: num('speed', 1)           // >1 accelera solo il ciclo del giorno (es. 720)
+};
+const LOW = CONFIG.quality === 'low';
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ===================== utilità ===================== */
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const damp = (a, b, k, dt) => lerp(a, b, 1 - Math.exp(-k * dt));
+function mulberry32(a){ return function(){ a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rand = mulberry32(73021);
+function hash(x, y){ const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); }
+function vnoise(x, y){
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y){ let s = 0, a = .5, f = 1; for (let i = 0; i < 4; i++){ s += a * vnoise(x * f, y * f); f *= 2; a *= .5; } return s; }
+const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
+const col = h => new THREE.Color(h);
+
+/* ===================== renderer / scena ===================== */
+const renderer = new THREE.WebGLRenderer({ antialias: !LOW, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, LOW ? 1 : 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x9fb4c8, 0.0022);
+const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.05, 1500);
+const CAM_BASE = V3(0, 1.85, 5.4), CAM_LOOK = V3(0, 1.68, 0);
+camera.position.copy(CAM_BASE);
+
+/* ===================== texture procedurali ===================== */
+function canvasTex(c, srgb = true){ const t = new THREE.CanvasTexture(c); if (srgb) t.encoding = THREE.sRGBEncoding; t.anisotropy = MAX_ANISO; return t; }
+function makeWood(){
+  const c = document.createElement('canvas'); c.width = 512; c.height = 1024; const g = c.getContext('2d');
+  const grd = g.createLinearGradient(0, 0, 512, 0);
+  grd.addColorStop(0, '#5e351c'); grd.addColorStop(.5, '#6e4124'); grd.addColorStop(1, '#5a321b');
+  g.fillStyle = grd; g.fillRect(0, 0, 512, 1024);
+  for (let i = 0; i < 260; i++){
+    const x = rand() * 512, dark = rand() < .62;
+    g.strokeStyle = dark ? `rgba(38,18,7,${.06 + rand() * .2})` : `rgba(175,115,62,${.04 + rand() * .12})`;
+    g.lineWidth = .5 + rand() * 2.6; g.beginPath();
+    for (let y = 0; y <= 1024; y += 12){
+      const xx = x + Math.sin(y * .005 + i) * 7 + Math.sin(y * .021 + i * 3) * 2.2;
+      y === 0 ? g.moveTo(xx, y) : g.lineTo(xx, y);
+    }
+    g.stroke();
+  }
+  for (let k = 0; k < 3; k++){
+    const kx = 60 + rand() * 390, ky = 100 + rand() * 820;
+    for (let r = 4; r < 46; r += 3){
+      g.strokeStyle = `rgba(35,16,6,${.18 - r * .003})`; g.lineWidth = 1.2;
+      g.beginPath(); g.ellipse(kx, ky, r * .55, r * 1.6, 0, 0, Math.PI * 2); g.stroke();
+    }
+  }
+  const t = canvasTex(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+function makeStone(){
+  const c = document.createElement('canvas'); c.width = c.height = 1024; const g = c.getContext('2d');
+  g.fillStyle = '#3e3a36'; g.fillRect(0, 0, 1024, 1024);
+  const S = 64;
+  for (let y = 0; y < 1024; y += S) for (let x = 0; x < 1024; x += S){
+    const off = ((y / S) % 2) * S * .5, v = 118 + rand() * 40 | 0;
+    g.fillStyle = `rgb(${v + 6},${v},${v - 10})`;
+    const w = S - 6 - rand() * 4, h = S - 6 - rand() * 4;
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x + off + 3, y + 3, w, h, 10); else g.rect(x + off + 3, y + 3, w, h);
+    g.fill();
+    for (let n = 0; n < 14; n++){ g.fillStyle = `rgba(${rand() < .5 ? '0,0,0' : '255,255,255'},${rand() * .06})`; g.fillRect(x + off + rand() * S, y + rand() * S, 3 + rand() * 7, 2 + rand() * 5); }
+  }
+  return canvasTex(c);
+}
+function makeDot(){
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(.35, 'rgba(255,255,255,.55)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64); return canvasTex(c);
+}
+function makeCloud(){
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256; const g = c.getContext('2d');
+  for (let i = 0; i < 26; i++){
+    const x = 90 + rand() * 330, y = 110 + (rand() - .5) * 70 - Math.sin((x - 90) / 330 * Math.PI) * 30, rr = 40 + rand() * 70;
+    const r = g.createRadialGradient(x, y, 0, x, y, rr);
+    r.addColorStop(0, 'rgba(255,255,255,.55)'); r.addColorStop(.6, 'rgba(255,255,255,.22)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.fill();
+  }
+  return canvasTex(c);
+}
+function makeMoon(){
+  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+  g.fillStyle = '#e9e6dc'; g.beginPath(); g.arc(128, 128, 126, 0, Math.PI * 2); g.fill();
+  for (let i = 0; i < 26; i++){
+    const a = rand() * Math.PI * 2, d = rand() * 100, r = 6 + rand() * 26;
+    g.fillStyle = `rgba(120,118,112,${.12 + rand() * .2})`;
+    g.beginPath(); g.arc(128 + Math.cos(a) * d, 128 + Math.sin(a) * d, r, 0, Math.PI * 2); g.fill();
+  }
+  return canvasTex(c);
+}
+const dotTex = makeDot(), cloudTex = makeCloud();
+
+/* ===================== cielo ===================== */
+const skyU = {
+  uTop: { value: col(0) }, uHor: { value: col(0) }, uBot: { value: col(0) },
+  uSunDir: { value: V3(0, 1, 0) }, uSunCol: { value: col(0) }, uSunVis: { value: 1 }
+};
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: skyU, side: THREE.BackSide, depthWrite: false, fog: false,
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform vec3 uTop, uHor, uBot, uSunCol, uSunDir; uniform float uSunVis; varying vec3 vDir;
+    void main(){
+      vec3 d = normalize(vDir); float h = d.y;
+      vec3 c = h >= 0.0 ? mix(uHor, uTop, pow(clamp(h,0.0,1.0), 0.48)) : mix(uHor, uBot, smoothstep(0.0, 0.18, -h));
+      float s = max(dot(d, normalize(uSunDir)), 0.0);
+      c += uSunCol * (pow(s, 5.0) * 0.22 + pow(s, 42.0) * 0.55) * uSunVis;
+      c += uSunCol * smoothstep(0.99955, 0.9998, s) * 7.0 * uSunVis;
+      gl_FragColor = vec4(c, 1.0);
+      #include <tonemapping_fragment>
+      #include <encodings_fragment>
+    }`
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(900, 48, 24), skyMat);
+sky.renderOrder = -10; sky.frustumCulled = false; scene.add(sky);
+
+// scena "specchio" per la mappa d'ambiente (riflessi su ottone, vetro, laccatura)
+const envScene = new THREE.Scene();
+envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), skyMat));
+const pmrem = new THREE.PMREMGenerator(renderer);
+let envRT = null, envTimer = 0;
+function refreshEnv(){
+  const rt = pmrem.fromScene(envScene, 0.04);
+  scene.environment = rt.texture;
+  if (envRT) envRT.dispose();
+  envRT = rt;
+}
+
+// stelle
+const starGeo = new THREE.BufferGeometry();
+{
+  const n = 1800, p = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++){
+    const u = rand(), v = .03 + rand() * .97, th = u * Math.PI * 2, y = v, r = Math.sqrt(1 - y * y);
+    p[i * 3] = Math.cos(th) * r * 800; p[i * 3 + 1] = y * 800; p[i * 3 + 2] = Math.sin(th) * r * 800;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(p, 3));
+}
+const starMat = new THREE.PointsMaterial({ size: 2.2 * Math.min(devicePixelRatio, 2), sizeAttenuation: false, map: dotTex, transparent: true, depthWrite: false, fog: false, opacity: 0 });
+const stars = new THREE.Points(starGeo, starMat); stars.renderOrder = -9; stars.frustumCulled = false; scene.add(stars);
+
+// luna
+const moon = new THREE.Mesh(new THREE.SphereGeometry(16, 32, 16), new THREE.MeshBasicMaterial({ map: makeMoon(), fog: false, transparent: true }));
+moon.renderOrder = -8; scene.add(moon);
+const moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: 0xb9c8ff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+moonGlow.scale.set(150, 150, 1); moonGlow.renderOrder = -8; scene.add(moonGlow);
+
+/* ===================== luci ===================== */
+const hemi = new THREE.HemisphereLight(0xbcd4ff, 0x2c2a20, 0.4); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 2); key.castShadow = true;
+key.shadow.mapSize.set(LOW ? 1024 : 2048, LOW ? 1024 : 2048);
+Object.assign(key.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11, near: 1, far: 90 });
+key.shadow.bias = -0.0004; key.shadow.normalBias = 0.025;
+key.target.position.set(0, 1, 0); scene.add(key, key.target);
+
+/* ===================== terreno ===================== */
+const snowU = { value: 0 };
+function addSnow(mat, amount){
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    if (prev) prev(sh, r);
+    sh.uniforms.uSnow = snowU;
+    sh.fragmentShader = 'uniform float uSnow;\n' + sh.fragmentShader.replace('#include <color_fragment>',
+      `#include <color_fragment>\n diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86,0.89,0.94), uSnow * ${amount.toFixed(2)});`);
+  };
+  return mat;
+}
+function heightAt(x, z){
+  const d = Math.hypot(x, z), k = smooth(7, 30, d);
+  return (fbm(x * .035 + 3, z * .035 + 7) - .42) * 7 * k + Math.max(0, d - 70) * .12 * k;
+}
+const groundGeo = new THREE.PlaneGeometry(320, 320, LOW ? 90 : 170, LOW ? 90 : 170);
+groundGeo.rotateX(-Math.PI / 2);
+{
+  const p = groundGeo.attributes.position, c = new Float32Array(p.count * 3);
+  const g1 = col('#3d5a26'), g2 = col('#6b7a32'), g3 = col('#2d4520'), tmp = col(0);
+  for (let i = 0; i < p.count; i++){
+    const x = p.getX(i), z = p.getZ(i); p.setY(i, heightAt(x, z));
+    const n = fbm(x * .08, z * .08), n2 = vnoise(x * .4, z * .4);
+    tmp.copy(g1).lerp(g2, smooth(.35, .75, n)).lerp(g3, n2 * .35);
+    c[i * 3] = tmp.r; c[i * 3 + 1] = tmp.g; c[i * 3 + 2] = tmp.b;
+  }
+  groundGeo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+  groundGeo.computeVertexNormals();
+}
+const groundMat = addSnow(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .95 }), 1);
+const ground = new THREE.Mesh(groundGeo, groundMat); ground.receiveShadow = true; scene.add(ground);
+
+const plazaMat = addSnow(new THREE.MeshStandardMaterial({ map: makeStone(), roughness: .85 }), .85);
+const plaza = new THREE.Mesh(new THREE.CylinderGeometry(3.3, 3.45, .12, 72), plazaMat);
+plaza.position.y = .06; plaza.receiveShadow = true; scene.add(plaza);
+
+// montagne lontane
+{
+  const mMat = addSnow(new THREE.MeshStandardMaterial({ color: 0x55667a, roughness: 1, flatShading: true }), .7);
+  for (let i = 0; i < 30; i++){
+    const a = -Math.PI * .95 + rand() * Math.PI * .9, d = 270 + rand() * 170;
+    const m = new THREE.Mesh(new THREE.ConeGeometry(60 + rand() * 90, 40 + rand() * 80, 5 + (rand() * 3 | 0)), mMat);
+    m.position.set(Math.cos(a) * d, 8, Math.sin(a) * d); m.rotation.y = rand() * 6; scene.add(m);
+  }
+}
+
+/* ===================== alberi ===================== */
+const trees = [];
+{
+  const trunkGeo = new THREE.CylinderGeometry(.11, .19, 1, 7); trunkGeo.translate(0, .5, 0);
+  const coneGeo = new THREE.ConeGeometry(1, 1.7, 9);
+  const blobGeo = new THREE.IcosahedronGeometry(1, 1);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3324, roughness: .95 });
+  const leafMats = ['#2f5a2a', '#3d6b2e', '#4f7a34', '#2a4d33'].map(c => addSnow(new THREE.MeshStandardMaterial({ color: c, roughness: .9, flatShading: true }), .55));
+  const pineMat = addSnow(new THREE.MeshStandardMaterial({ color: 0x1f4030, roughness: .9, flatShading: true }), .6);
+  for (let i = 0; i < (LOW ? 26 : 46); i++){
+    let x, z, d;
+    do { const a = rand() * Math.PI * 2; d = 8 + Math.pow(rand(), .7) * 48; x = Math.cos(a) * d; z = Math.sin(a) * d; }
+    while (z > 0 && Math.abs(x) < 9);
+    const g = new THREE.Group(), conifer = rand() < .45, s = .8 + rand() * .9;
+    const tr = new THREE.Mesh(trunkGeo, trunkMat); tr.scale.set(1, conifer ? 1.2 : 1.9, 1); g.add(tr);
+    if (conifer){
+      for (let k = 0; k < 3; k++){ const c = new THREE.Mesh(coneGeo, pineMat); const sc = 1.25 - k * .3; c.scale.set(sc, sc, sc); c.position.y = 1.6 + k * .85; g.add(c); }
+    } else {
+      const m = leafMats[(rand() * leafMats.length) | 0];
+      for (let k = 0; k < 4; k++){ const b = new THREE.Mesh(blobGeo, m); const sc = .75 + rand() * .5; b.scale.set(sc, sc * .9, sc); b.position.set((rand() - .5) * 1.1, 2.3 + rand() * .9, (rand() - .5) * 1.1); g.add(b); }
+    }
+    g.traverse(o => { if (o.isMesh){ o.castShadow = d < 26; o.receiveShadow = true; } });
+    g.scale.setScalar(s); g.position.set(x, heightAt(x, z) - .05, z); g.rotation.y = rand() * 6;
+    g.userData = { ph: rand() * 10, stiff: .6 + rand() * .6 };
+    scene.add(g); trees.push(g);
+  }
+}
+
+/* ===================== erba (instanced, ondeggia col vento) ===================== */
+const grassU = { uTime: { value: 0 }, uWind: { value: 2 }, uWindDir: { value: new THREE.Vector2(1, 0) } };
+let grass;
+{
+  const bladeGeo = new THREE.PlaneGeometry(.05, .3, 1, 4); bladeGeo.translate(0, .15, 0);
+  const p = bladeGeo.attributes.position, nrm = bladeGeo.attributes.normal;
+  for (let i = 0; i < p.count; i++){ const y = p.getY(i); p.setX(i, p.getX(i) * (1 - y / .3 * .9)); p.setZ(i, y * y * .45); nrm.setXYZ(i, 0, 1, 0); }
+  const gm = new THREE.MeshStandardMaterial({ roughness: .85, side: THREE.DoubleSide });
+  gm.onBeforeCompile = sh => {
+    Object.assign(sh.uniforms, grassU); sh.uniforms.uSnow = snowU;
+    sh.vertexShader = 'uniform float uTime; uniform float uWind; uniform vec2 uWindDir;\n' + sh.vertexShader.replace('#include <project_vertex>', `
+      vec4 mvPosition = vec4(transformed, 1.0);
+      #ifdef USE_INSTANCING
+        mvPosition = instanceMatrix * mvPosition;
+      #endif
+      float hh = position.y;
+      float ph = uTime * (1.2 + uWind * .08) + mvPosition.x * .3 + mvPosition.z * .22;
+      float bend = (0.04 + uWind * 0.022) * (0.65 + 0.35 * sin(ph)) + 0.015 * sin(uTime * 6.0 + mvPosition.x * 3.0);
+      mvPosition.xz += uWindDir * bend * hh * hh * 14.0;
+      mvPosition = modelViewMatrix * mvPosition;
+      gl_Position = projectionMatrix * mvPosition;`);
+    sh.fragmentShader = 'uniform float uSnow;\n' + sh.fragmentShader.replace('#include <color_fragment>',
+      '#include <color_fragment>\n diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86,0.89,0.94), uSnow * 0.92);')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n normal = normalize(vNormal);');
+  };
+  const N = LOW ? 2500 : 8000;
+  grass = new THREE.InstancedMesh(bladeGeo, gm, N);
+  const dmy = new THREE.Object3D(), c1 = col('#3b5e22'), c2 = col('#8a9a3a'), tc = col(0);
+  for (let i = 0; i < N; i++){
+    const a = rand() * Math.PI * 2, r = 3.5 + Math.pow(rand(), 1.5) * 28;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (z > 1.5 && Math.abs(x) < 3.5 + (z - 1.5) * .9) { i--; continue; } // niente erba davanti all'obiettivo
+    dmy.position.set(x, heightAt(x, z), z); dmy.rotation.set(0, rand() * 6.28, 0);
+    const s = .6 + rand() * .9; dmy.scale.set(1, s, 1); dmy.updateMatrix(); grass.setMatrixAt(i, dmy.matrix);
+    tc.copy(c1).lerp(c2, rand() * .7); grass.setColorAt(i, tc);
+  }
+  grass.receiveShadow = true; grass.frustumCulled = false; scene.add(grass);
+}
+
+/* ===================== lampione e panchina ===================== */
+const ironMat = new THREE.MeshStandardMaterial({ color: 0x1c1e22, metalness: .7, roughness: .45 });
+const lanternGlass = new THREE.MeshStandardMaterial({ color: 0x2a2116, emissive: 0xffb24d, emissiveIntensity: 0, roughness: .2 });
+const lamp = new THREE.Group(); lamp.position.set(2.5, .12, -.7); scene.add(lamp);
+{
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(.04, .06, 2.7, 12), ironMat); pole.position.y = 1.35; lamp.add(pole);
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(.12, .16, .25, 12), ironMat); base.position.y = .12; lamp.add(base);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(.24, .32, .24), lanternGlass); head.position.y = 2.86; lamp.add(head);
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(.2, .16, 4), ironMat); cap.position.y = 3.1; cap.rotation.y = Math.PI / 4; lamp.add(cap);
+  lamp.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = true; } });
+}
+const lampLight = new THREE.PointLight(0xffb565, 0, 13, 2); lampLight.position.set(2.5, 2.95, -.7); scene.add(lampLight);
+const lampHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: 0xffc070, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0 }));
+lampHalo.position.copy(lampLight.position); lampHalo.scale.set(1.6, 1.6, 1); scene.add(lampHalo);
+{
+  const bench = new THREE.Group(); bench.position.set(-2.25, .12, .55); bench.rotation.y = .35; scene.add(bench);
+  const plank = new THREE.MeshStandardMaterial({ color: 0x7a5232, roughness: .8 });
+  addSnow(plank, .6);
+  for (let i = 0; i < 3; i++){ const p = new THREE.Mesh(new THREE.BoxGeometry(1.4, .04, .12), plank); p.position.set(0, .45, -.14 + i * .14); bench.add(p); }
+  for (let i = 0; i < 2; i++){ const p = new THREE.Mesh(new THREE.BoxGeometry(1.4, .1, .03), plank); p.position.set(0, .66 + i * .14, -.24); p.rotation.x = -.15; bench.add(p); }
+  for (const sx of [-.6, .6]){ const l = new THREE.Mesh(new THREE.BoxGeometry(.05, .45, .45), ironMat); l.position.set(sx, .23, -.05); bench.add(l); }
+  bench.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = true; } });
+}
+
+/* ===================== OROLOGIO A PENDOLO ===================== */
+const clock = new THREE.Group(); clock.position.set(0, .12, 0); scene.add(clock);
+const woodTex = makeWood();
+const woodMat = new THREE.MeshPhysicalMaterial({ map: woodTex, roughness: .38, clearcoat: .7, clearcoatRoughness: .22 });
+const woodDarkMat = new THREE.MeshPhysicalMaterial({ map: woodTex, color: 0x8f7766, roughness: .42, clearcoat: .6, clearcoatRoughness: .25 });
+const brassMat = new THREE.MeshStandardMaterial({ color: 0xd4ad5a, metalness: 1, roughness: .28 });
+const interiorMat = new THREE.MeshStandardMaterial({ color: 0x2e241b, roughness: .9, envMapIntensity: .2 });
+function part(geo, mat, x, y, z, parent = clock){ const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; parent.add(m); return m; }
+const box = (w, h, d, mat, x, y, z) => part(new THREE.BoxGeometry(w, h, d), mat, x, y, z);
+
+const FACE_R = .46, HB = 1.47, HT = 2.53, FACE_Y = (HB + HT) / 2, HH = HT - HB, HW = 1.0, HD = .62;
+const GLASS_TIP = .284; // superficie interna del vetro: qui l'omino appoggia il pennarello
+
+box(1.02, .22, .70, woodDarkMat, 0, .11, 0);
+box(.94, .05, .64, woodMat, 0, .245, 0);
+box(.78, 1.14, .52, woodMat, 0, .84, 0);
+box(.58, .92, .03, woodDarkMat, 0, .84, .27);
+part(new THREE.CylinderGeometry(.018, .018, .02, 16), brassMat, .22, .84, .29).rotation.x = Math.PI / 2;
+box(.94, .06, .62, woodDarkMat, 0, 1.44, 0);
+box(HW, HH, .03, interiorMat, 0, FACE_Y, -.295);
+box(.04, HH, HD, woodMat, -.48, FACE_Y, 0);
+box(.04, HH, HD, woodMat, .48, FACE_Y, 0);
+box(HW, .04, HD, woodMat, 0, HT - .02, 0);
+box(HW, .04, HD, interiorMat, 0, HB + .02, 0);
+{
+  const fs = new THREE.Shape();
+  fs.moveTo(-HW / 2, -HH / 2); fs.lineTo(HW / 2, -HH / 2); fs.lineTo(HW / 2, HH / 2); fs.lineTo(-HW / 2, HH / 2); fs.closePath();
+  const hole = new THREE.Path(); hole.absarc(0, 0, FACE_R, 0, Math.PI * 2, true); fs.holes.push(hole);
+  const fg = new THREE.ExtrudeGeometry(fs, { depth: .035, bevelEnabled: true, bevelThickness: .008, bevelSize: .008, bevelSegments: 2, curveSegments: 96 });
+  part(fg, woodMat, 0, FACE_Y, .275);
+  part(new THREE.TorusGeometry(FACE_R + .008, .016, 16, 128), brassMat, 0, FACE_Y, .318);
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]){
+    const r = part(new THREE.CylinderGeometry(.035, .035, .012, 24), brassMat, sx * .4, FACE_Y + sy * .42, .318); r.rotation.x = Math.PI / 2;
+    part(new THREE.SphereGeometry(.014, 12, 8), brassMat, sx * .4, FACE_Y + sy * .42, .328);
+  }
+  for (const sx of [-1, 1]){
+    part(new THREE.CylinderGeometry(.028, .028, HH, 16), woodDarkMat, sx * .52, FACE_Y, .3);
+    part(new THREE.SphereGeometry(.036, 16, 10), brassMat, sx * .52, HT + .01, .3);
+    part(new THREE.SphereGeometry(.036, 16, 10), brassMat, sx * .52, HB - .01, .3);
+  }
+  const cs = new THREE.Shape();
+  cs.moveTo(-.56, 0); cs.lineTo(.56, 0); cs.lineTo(.56, .08); cs.quadraticCurveTo(0, .34, -.56, .08); cs.closePath();
+  part(new THREE.ExtrudeGeometry(cs, { depth: .64, bevelEnabled: true, bevelThickness: .01, bevelSize: .01, bevelSegments: 2, curveSegments: 32 }), woodDarkMat, 0, HT, -.32);
+  part(new THREE.SphereGeometry(.035, 16, 10), brassMat, -.5, HT + .12, 0);
+  part(new THREE.SphereGeometry(.035, 16, 10), brassMat, .5, HT + .12, 0);
+  part(new THREE.CylinderGeometry(.012, .02, .08, 12), brassMat, 0, HT + .25, 0);
+  part(new THREE.SphereGeometry(.045, 20, 12), brassMat, 0, HT + .31, 0);
+}
+// vetro + strato d'inchiostro (canvas)
+const faceCanvas = document.createElement('canvas'); faceCanvas.width = faceCanvas.height = 1024;
+const fctx = faceCanvas.getContext('2d');
+const faceTex = canvasTex(faceCanvas);
+const ink = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.MeshStandardMaterial({ map: faceTex, transparent: true, roughness: .7, depthWrite: false }));
+ink.position.set(0, FACE_Y, .288); clock.add(ink);
+const glass = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: .03, metalness: 0, transparent: true, opacity: .1, clearcoat: 1, envMapIntensity: 1.6, depthWrite: false }));
+glass.position.set(0, FACE_Y, .293); clock.add(glass);
+const interiorLight = new THREE.PointLight(0xffc98a, .6, 1.7, 2); interiorLight.position.set(0, HT - .12, .08); clock.add(interiorLight);
+
+/* ===================== L'OMINO ===================== */
+const skinMat = new THREE.MeshStandardMaterial({ color: 0xd9a98c, roughness: .55, envMapIntensity: .35 });
+const shirtMat = new THREE.MeshStandardMaterial({ color: 0x34507a, roughness: .85, envMapIntensity: .35 });
+const hairMat = new THREE.MeshStandardMaterial({ color: 0x2e2219, roughness: .7, envMapIntensity: .3 });
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .4 });
+const UP = V3(0, 1, 0), tmpA = V3(), tmpB = V3(), tmpC = V3();
+
+const torso = new THREE.Group(); torso.position.set(0, 1.27, -.07); clock.add(torso);
+{
+  const body = part(new THREE.CylinderGeometry(.17, .13, .55, 24), shirtMat, 0, .25, 0, torso); body.scale.z = .6;
+  part(new THREE.SphereGeometry(.17, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), shirtMat, 0, .52, 0, torso).scale.set(1, .35, .6);
+  part(new THREE.CylinderGeometry(.045, .05, .12, 14), skinMat, 0, .58, 0, torso);
+  const collar = part(new THREE.TorusGeometry(.052, .014, 8, 20), shirtMat, 0, .56, 0, torso); collar.rotation.x = Math.PI / 2;
+}
+const shoulderL = new THREE.Object3D(); shoulderL.position.set(-.165, .49, 0); torso.add(shoulderL);
+const shoulderR = new THREE.Object3D(); shoulderR.position.set(.165, .49, 0); torso.add(shoulderR);
+part(new THREE.SphereGeometry(.058, 16, 12), shirtMat, -.165, .49, 0, torso);
+part(new THREE.SphereGeometry(.058, 16, 12), shirtMat, .165, .49, 0, torso);
+
+const head = new THREE.Group(); head.position.set(0, .7, .005); torso.add(head);
+const eyes = [];
+{
+  part(new THREE.SphereGeometry(.1, 32, 24), skinMat, 0, 0, 0, head).scale.set(.92, 1.08, .98);
+  const hair = part(new THREE.SphereGeometry(.105, 32, 16, 0, Math.PI * 2, 0, Math.PI * .55), hairMat, 0, .012, -.006, head); hair.rotation.x = -.3;
+  for (const s of [-1, 1]){
+    part(new THREE.SphereGeometry(.022, 12, 8), skinMat, s * .092, -.005, -.005, head).scale.set(.5, 1, .8);
+    eyes.push(part(new THREE.SphereGeometry(.011, 12, 8), darkMat, s * .035, .018, .09, head));
+    part(new THREE.TorusGeometry(.024, .0035, 8, 24), darkMat, s * .037, .018, .1, head);
+    part(new THREE.BoxGeometry(.028, .006, .006), hairMat, s * .036, .05, .094, head).rotation.z = -s * .12;
+  }
+  part(new THREE.BoxGeometry(.026, .003, .003), darkMat, 0, .02, .104, head);
+  part(new THREE.SphereGeometry(.018, 12, 8), skinMat, 0, -.012, .1, head).scale.set(.8, 1, 1.3);
+  part(new THREE.BoxGeometry(.032, .005, .005), new THREE.MeshStandardMaterial({ color: 0x7a3f33, roughness: .6 }), 0, -.046, .092, head);
+}
+function makeArm(side){
+  const a = {
+    side,
+    upper: part(new THREE.CylinderGeometry(.045, .04, 1, 14), shirtMat, 0, 0, 0),
+    fore: part(new THREE.CylinderGeometry(.037, .03, 1, 14), skinMat, 0, 0, 0),
+    cuff: part(new THREE.TorusGeometry(.04, .013, 8, 18), shirtMat, 0, 0, 0),
+    elbow: part(new THREE.SphereGeometry(.044, 14, 10), shirtMat, 0, 0, 0),
+    hand: part(new THREE.SphereGeometry(.042, 16, 12), skinMat, 0, 0, 0),
+    elbowP: V3(), wristP: V3()
+  };
+  a.hand.scale.set(.8, 1, .75);
+  return a;
+}
+const armR = makeArm(1), armL = makeArm(-1);
+const pen = part(new THREE.CylinderGeometry(.011, .011, 1, 10), darkMat, 0, 0, 0);
+const penCap = part(new THREE.CylinderGeometry(.0125, .0125, .03, 10), new THREE.MeshStandardMaterial({ color: 0xc2452d, roughness: .5 }), 0, 0, 0);
+const cloth = (() => {
+  const g = new THREE.IcosahedronGeometry(.05, 2), p = g.attributes.position;
+  for (let i = 0; i < p.count; i++){ const k = .8 + hash(i, 3) * .4; p.setXYZ(i, p.getX(i) * k, p.getY(i) * k, p.getZ(i) * k); }
+  g.computeVertexNormals();
+  const m = part(g, new THREE.MeshStandardMaterial({ color: 0xf1ede4, roughness: 1 }), 0, 0, 0); m.scale.set(1.1, 1, .35); return m;
+})();
+
+function placeLimb(mesh, a, b){
+  tmpA.subVectors(b, a); const len = tmpA.length() || 1e-4;
+  mesh.position.copy(a).addScaledVector(tmpA, .5);
+  mesh.scale.set(1, len, 1);
+  mesh.quaternion.setFromUnitVectors(UP, tmpA.normalize());
+}
+function solveIK(sh, target, L1, L2, pole, outElbow, outWrist){
+  const d = tmpB.subVectors(target, sh); const dist = clamp(d.length(), .02, L1 + L2 - .002);
+  const dir = d.normalize();
+  const a = (L1 * L1 - L2 * L2 + dist * dist) / (2 * dist), h = Math.sqrt(Math.max(L1 * L1 - a * a, 0));
+  const pd = tmpC.copy(pole).addScaledVector(dir, -pole.dot(dir)).normalize();
+  outElbow.copy(sh).addScaledVector(dir, a).addScaledVector(pd, h);
+  outWrist.copy(sh).addScaledVector(dir, dist);
+}
+const L1 = .29, L2 = .27;
+function worldOf(obj, out){ return clock.worldToLocal(obj.getWorldPosition(out)); }
+
+/* ===================== disegno sul vetro ===================== */
+const strokes = [];
+let faceDirty = true, simT = 0;
+const PX = x => 512 + x / FACE_R * 512, PY = y => 512 - y / FACE_R * 512;
+function hourQuant(totalMin){ return Math.floor(((totalMin % 720) * .5) / 6) * 6; } // lancetta ore: scatta ogni 12 minuti
+function makeStroke(kind, angDeg){
+  const len = kind === 'hour' ? .25 : .39, width = kind === 'hour' ? 52 : 38;
+  const a = angDeg * Math.PI / 180, sa = Math.sin(a), ca = Math.cos(a), ph = Math.random() * 10, N = 48, pts = [];
+  for (let i = 0; i <= N; i++){
+    const t = i / N, r = -.012 + t * (len + .012);
+    const wob = (Math.sin(t * 5 + ph) * .6 + Math.sin(t * 13 + ph * 2) * .4) * .0028 * (.3 + t);
+    const taper = t > .9 ? 1 - (t - .9) / .1 * .3 : 1;
+    pts.push({ x: sa * r + ca * wob, y: ca * r - sa * wob, w: width * (.92 + .12 * Math.sin(t * 9 + ph)) * taper });
+  }
+  return { kind, angle: angDeg, len, pts, drawn: 0, erased: 0, erasedAt: -1 };
+}
+function strokePt(s, t){
+  const n = s.pts.length - 1, i = clamp(Math.floor(t), 0, n - 1), f = clamp(t - i, 0, 1), p = s.pts[i], q = s.pts[i + 1];
+  return { x: lerp(p.x, q.x, f), y: lerp(p.y, q.y, f), w: lerp(p.w, q.w, f) };
+}
+function drawSeg(s, a, b, style, wmul, dx = 0, dy = 0){
+  if (b <= a) return;
+  fctx.strokeStyle = style; fctx.lineCap = 'round'; fctx.lineJoin = 'round';
+  for (let i = Math.floor(a); i < Math.ceil(b); i++){
+    const t0 = Math.max(a, i), t1 = Math.min(b, i + 1); if (t1 <= t0) continue;
+    const p0 = strokePt(s, t0), p1 = strokePt(s, t1);
+    fctx.lineWidth = p0.w * wmul; fctx.beginPath();
+    fctx.moveTo(PX(p0.x) + dx, PY(p0.y) + dy); fctx.lineTo(PX(p1.x) + dx, PY(p1.y) + dy); fctx.stroke();
+  }
+}
+function renderFace(){
+  fctx.clearRect(0, 0, 1024, 1024);
+  for (let k = strokes.length - 1; k >= 0; k--){
+    const s = strokes[k];
+    if (s.erased >= 1 && s.erasedAt > 0 && simT - s.erasedAt > 6){ strokes.splice(k, 1); }
+  }
+  let fading = false;
+  for (const s of strokes){
+    const n = s.pts.length - 1, drawEnd = s.drawn * n, eraseStart = (1 - s.erased) * n;
+    if (s.erased > 0){
+      const age = s.erasedAt > 0 ? simT - s.erasedAt : 0, sa = .2 * clamp(1 - age / 5, 0, 1);
+      if (sa > .004){ fading = true; fctx.filter = 'blur(7px)'; drawSeg(s, eraseStart, drawEnd, `rgba(80,80,86,${sa.toFixed(3)})`, 1.7); fctx.filter = 'none'; }
+    }
+    const end = Math.min(drawEnd, eraseStart);
+    drawSeg(s, 0, end, 'rgba(14,12,11,.97)', 1);
+    drawSeg(s, 0, end, 'rgba(70,66,62,.28)', .38, 3, -2);
+  }
+  faceTex.needsUpdate = true;
+  faceDirty = fading;
+}
+
+/* ===================== l'omino: compiti (cancella / disegna / attende) ===================== */
+const REST_PEN = V3(.11, 1.58, .12), REST_CLOTH = V3(-.14, 1.53, .05);
+const rig = {
+  mode: 'idle', penTip: REST_PEN.clone(), penDesired: V3(), cloth: REST_CLOTH.clone(), clothDesired: V3(),
+  penK: 9, clothK: 9, look: V3(0, FACE_Y, .3)
+};
+const state = { minute: null, hour: null, dispMin: -1, dispHour: -1 };
+const nowTotal = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+const tasks = []; let cur = null;
+
+function taskDraw(kind, getTotal){
+  return {
+    t: 0,
+    start(){
+      const tm = getTotal(), ang = kind === 'minute' ? (tm % 60) * 6 : hourQuant(tm);
+      this.s = makeStroke(kind, ang); strokes.push(this.s);
+      if (kind === 'minute'){ state.minute = this.s; state.dispMin = tm; } else { state.hour = this.s; state.dispHour = ang; }
+      this.travel = .6; this.dur = kind === 'hour' ? 1.7 : 2.1;
+    },
+    update(dt){
+      this.t += dt; const s = this.s; rig.mode = 'pen';
+      if (this.t < this.travel){ const p = s.pts[0]; rig.penDesired.set(p.x, FACE_Y + p.y, GLASS_TIP - .045); rig.penK = 10; return false; }
+      const u = clamp((this.t - this.travel) / this.dur, 0, 1), e = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+      const p = strokePt(s, e * (s.pts.length - 1));
+      rig.penDesired.set(p.x, FACE_Y + p.y, GLASS_TIP); rig.penK = 30;
+      if (s.drawn !== e){ s.drawn = e; faceDirty = true; }
+      if (u >= 1){ rig.penDesired.z = GLASS_TIP - .05; rig.penK = 8; return this.t > this.travel + this.dur + .35; }
+      return false;
+    }
+  };
+}
+function taskErase(kind){
+  return {
+    t: 0,
+    start(){
+      this.s = state[kind]; this.travel = .55; this.dur = kind === 'minute' ? 2.8 : 2.3; this.swipes = kind === 'minute' ? 6 : 5;
+      if (this.s) state[kind] = null;
+    },
+    update(dt){
+      const s = this.s; if (!s) return true;
+      this.t += dt; rig.mode = 'cloth';
+      const a = s.angle * Math.PI / 180, sa = Math.sin(a), ca = Math.cos(a), L = s.len + .025;
+      if (this.t < this.travel){ rig.clothDesired.set(sa * L, FACE_Y + ca * L, GLASS_TIP - .05); rig.clothK = 10; return false; }
+      const u = clamp((this.t - this.travel) / this.dur, 0, 1), r = L - u * (L + .03), side = Math.sin(u * Math.PI * 2 * this.swipes) * .032;
+      rig.clothDesired.set(sa * r + ca * side, FACE_Y + ca * r - sa * side, GLASS_TIP - .008); rig.clothK = 22;
+      const tCut = clamp((r + .025 + .012) / (s.len + .012), 0, 1), er = 1 - tCut;
+      if (er > s.erased){ s.erased = er; faceDirty = true; }
+      if (u >= 1){
+        if (s.erasedAt < 0){ s.erased = 1; s.erasedAt = simT; faceDirty = true; }
+        rig.clothDesired.z = GLASS_TIP - .06; rig.clothK = 8;
+        return this.t > this.travel + this.dur + .3;
+      }
+      return false;
+    }
+  };
+}
+function taskWaitMinute(target){
+  return {
+    start(){},
+    update(){
+      rig.mode = 'pen'; rig.penDesired.set(.025, FACE_Y - .015, GLASS_TIP - .05); rig.penK = 6;
+      return ((nowTotal() - target + 1440) % 1440) < 720;
+    }
+  };
+}
+function schedule(){
+  const d = new Date(), tm = d.getHours() * 60 + d.getMinutes(), sec = d.getSeconds() + d.getMilliseconds() / 1000;
+  if (!state.minute && !state.hour && state.dispMin < 0){
+    tasks.push(taskDraw('hour', nowTotal), taskDraw('minute', nowTotal)); return;
+  }
+  const next = (tm + 1) % 1440, needHour = hourQuant(next) !== state.dispHour, lead = needHour ? 12.5 : 6.5;
+  if (state.dispMin === tm && sec >= 60 - lead){
+    tasks.push(taskErase('minute'));
+    if (needHour) tasks.push(taskErase('hour'), taskDraw('hour', () => next));
+    tasks.push(taskWaitMinute(next), taskDraw('minute', nowTotal));
+  } else if (state.dispMin !== tm){
+    // fuori sincrono (pagina appena aperta, schermo in pausa...): ridisegna subito
+    tasks.push(taskErase('minute'));
+    if (hourQuant(tm) !== state.dispHour) tasks.push(taskErase('hour'), taskDraw('hour', nowTotal));
+    tasks.push(taskDraw('minute', nowTotal));
+  }
+}
+function runTasks(dt){
+  rig.mode = 'idle'; rig.penDesired.copy(REST_PEN); rig.clothDesired.copy(REST_CLOTH); rig.penK = 6; rig.clothK = 6;
+  if (!cur){ if (!tasks.length) schedule(); if (tasks.length){ cur = tasks.shift(); cur.start(); } }
+  if (cur && cur.update(dt)) cur = null;
+}
+
+let blinkT = 2, lookCamT = 6, lookingCam = false;
+const qTmp = new THREE.Quaternion(), poleR = V3(.7, -1, -.45), poleL = V3(-.7, -1, -.45), penDir = V3(), shTmp = V3();
+function updateRig(dt){
+  const breath = Math.sin(simT * 1.6) * .004;
+  rig.penTip.x = damp(rig.penTip.x, rig.penDesired.x, rig.penK, dt);
+  rig.penTip.y = damp(rig.penTip.y, rig.penDesired.y, rig.penK, dt);
+  rig.penTip.z = damp(rig.penTip.z, rig.penDesired.z, rig.penK, dt);
+  rig.cloth.x = damp(rig.cloth.x, rig.clothDesired.x, rig.clothK, dt);
+  rig.cloth.y = damp(rig.cloth.y, rig.clothDesired.y, rig.clothK, dt);
+  rig.cloth.z = damp(rig.cloth.z, rig.clothDesired.z, rig.clothK, dt);
+
+  const act = rig.mode === 'pen' ? rig.penTip : rig.mode === 'cloth' ? rig.cloth : null;
+  const tx = act ? clamp(act.x * .5, -.17, .17) : 0;
+  const ty = 1.27 + (act ? clamp((act.y - FACE_Y) * .42, -.12, .11) : 0) + breath;
+  torso.position.x = damp(torso.position.x, tx, 3.5, dt);
+  torso.position.y = damp(torso.position.y, ty, 3.5, dt);
+  torso.position.z = damp(torso.position.z, act ? -.045 : -.07, 3, dt);
+  torso.rotation.z = -torso.position.x * .5;
+  torso.rotation.x = damp(torso.rotation.x, act ? .06 + Math.max(0, 1.27 - torso.position.y) * .9 : .02, 3, dt);
+  torso.updateMatrixWorld(true);
+
+  // braccio destro + pennarello
+  worldOf(shoulderR, shTmp);
+  penDir.subVectors(rig.penTip, shTmp).normalize().multiplyScalar(.6).add(tmpA.set(0, 0, 1)).normalize();
+  const wristTarget = tmpC.copy(rig.penTip).addScaledVector(penDir, -.13).clone();
+  solveIK(shTmp, wristTarget, L1, L2, poleR, armR.elbowP, armR.wristP);
+  applyArm(armR, shTmp);
+  placeLimb(pen, armR.wristP, tmpB.copy(armR.wristP).addScaledVector(penDir, .135));
+  penCap.position.copy(armR.wristP).addScaledVector(penDir, -.01); penCap.quaternion.copy(pen.quaternion);
+
+  // braccio sinistro + panno
+  worldOf(shoulderL, shTmp);
+  const wl = V3(rig.cloth.x - .01, rig.cloth.y - .015, rig.cloth.z - .055);
+  solveIK(shTmp, wl, L1, L2, poleL, armL.elbowP, armL.wristP);
+  applyArm(armL, shTmp);
+  cloth.position.set(armL.wristP.x + .01, armL.wristP.y + .015, armL.wristP.z + .05);
+  cloth.rotation.z = Math.sin(simT * 7) * (rig.mode === 'cloth' ? .25 : .05);
+
+  // sguardo
+  lookCamT -= dt;
+  if (lookCamT <= 0){ lookingCam = !lookingCam; lookCamT = lookingCam ? 2.5 + Math.random() * 2 : 7 + Math.random() * 8; }
+  const look = tmpA;
+  if (act) look.copy(act);
+  else if (lookingCam) look.copy(clock.worldToLocal(camera.position.clone()));
+  else look.set(0, FACE_Y + .05, .3);
+  rig.look.lerp(look, 1 - Math.exp(-dt * 5));
+  const q0 = qTmp.copy(head.quaternion);
+  head.lookAt(clock.localToWorld(rig.look.clone()));
+  const qT = head.quaternion.clone(); head.quaternion.copy(q0).slerp(qT, 1 - Math.exp(-dt * 6));
+
+  blinkT -= dt; if (blinkT <= 0) blinkT = 2.5 + Math.random() * 4;
+  const bl = blinkT < .12 ? .12 : 1; for (const e of eyes) e.scale.y = bl;
+}
+function applyArm(a, sh){
+  placeLimb(a.upper, sh, a.elbowP);
+  placeLimb(a.fore, a.elbowP, a.wristP);
+  a.elbow.position.copy(a.elbowP);
+  a.cuff.position.copy(a.elbowP).lerp(a.wristP, .12);
+  a.cuff.quaternion.copy(a.fore.quaternion).multiply(qTmp.setFromAxisAngle(tmpA.set(1, 0, 0), Math.PI / 2));
+  a.hand.position.copy(a.wristP);
+  a.hand.quaternion.copy(a.fore.quaternion);
+}
+
+/* ===================== meteo: effetti ===================== */
+const W  = { cloud: .3, rain: 0, snow: 0, fog: 0, storm: 0, wind: 2.5 };
+const WT = { ...W };
+const windDir = new THREE.Vector2(1, 0), windDirT = new THREE.Vector2(1, 0);
+let wet = 0, flash = 0, tempC = 15;
+const PRESETS = {
+  sereno:    { cloud: .05, rain: 0, snow: 0, fog: 0, storm: 0, wind: 2 },
+  nuvoloso:  { cloud: .9, rain: 0, snow: 0, fog: 0, storm: 0, wind: 5 },
+  pioggia:   { cloud: .97, rain: .75, snow: 0, fog: .15, storm: 0, wind: 6 },
+  temporale: { cloud: 1, rain: 1, snow: 0, fog: .1, storm: 1, wind: 12 },
+  neve:      { cloud: .92, rain: 0, snow: .85, fog: .1, storm: 0, wind: 3 },
+  nebbia:    { cloud: .6, rain: 0, snow: 0, fog: 1, storm: 0, wind: 1 }
+};
+const PRESET_LABEL = { sereno: 'Sereno', nuvoloso: 'Nuvoloso', pioggia: 'Pioggia', temporale: 'Temporale', neve: 'Neve', nebbia: 'Nebbia' };
+
+// pioggia
+const RN = LOW ? 1500 : 4500;
+const rainGeo = new THREE.BufferGeometry();
+const rainArr = new Float32Array(RN * 6), rainVel = new Float32Array(RN), rainP = new Float32Array(RN * 3);
+for (let i = 0; i < RN; i++){ rainP[i * 3] = (rand() - .5) * 30; rainP[i * 3 + 1] = rand() * 15; rainP[i * 3 + 2] = -15 + rand() * 20; rainVel[i] = 11 + rand() * 5; }
+rainGeo.setAttribute('position', new THREE.BufferAttribute(rainArr, 3));
+const rainMat = new THREE.LineBasicMaterial({ color: 0xaab6c4, transparent: true, opacity: .5, depthWrite: false });
+const rain = new THREE.LineSegments(rainGeo, rainMat); rain.frustumCulled = false; scene.add(rain);
+// neve
+const SN = LOW ? 1200 : 3500;
+const snowGeo = new THREE.BufferGeometry(), snowArr = new Float32Array(SN * 3), snowVel = new Float32Array(SN);
+for (let i = 0; i < SN; i++){ snowArr[i * 3] = (rand() - .5) * 30; snowArr[i * 3 + 1] = rand() * 13; snowArr[i * 3 + 2] = -15 + rand() * 20; snowVel[i] = .6 + rand() * .8; }
+snowGeo.setAttribute('position', new THREE.BufferAttribute(snowArr, 3));
+const snowMat = new THREE.PointsMaterial({ size: .06, map: dotTex, transparent: true, depthWrite: false, color: 0xffffff });
+const snowPts = new THREE.Points(snowGeo, snowMat); snowPts.frustumCulled = false; scene.add(snowPts);
+// nuvole
+const clouds = [];
+for (let i = 0; i < 46; i++){
+  const m = new THREE.SpriteMaterial({ map: cloudTex, transparent: true, depthWrite: false, fog: false, opacity: 0 });
+  const s = new THREE.Sprite(m); const w = 90 + rand() * 120;
+  s.scale.set(w, w * (.42 + rand() * .2), 1);
+  s.position.set((rand() - .5) * 760, 35 + rand() * 60, -140 - rand() * 300);
+  s.userData = { th: rand() * .95, sp: .6 + rand() * .8 };
+  s.renderOrder = -7; scene.add(s); clouds.push(s);
+}
+// fulmine
+const boltGeo = new THREE.BufferGeometry(); boltGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(20 * 3), 3));
+const bolt = new THREE.Line(boltGeo, new THREE.LineBasicMaterial({ color: 0xeef2ff, transparent: true, opacity: 0, fog: false }));
+bolt.frustumCulled = false; scene.add(bolt);
+function strikeBolt(){
+  const a = boltGeo.attributes.position, bx = (Math.random() - .5) * 300, bz = -180 - Math.random() * 140;
+  let x = bx, y = 95;
+  for (let i = 0; i < 20; i++){ a.setXYZ(i, x, y, bz); x += (Math.random() - .5) * 14; y -= 95 / 19; }
+  a.needsUpdate = true;
+}
+// lucciole (notti serene e miti)
+const FF = 60, ffGeo = new THREE.BufferGeometry(), ffArr = new Float32Array(FF * 3), ffSeed = [];
+for (let i = 0; i < FF; i++){ const a = rand() * 6.28, r = 3 + rand() * 7; ffSeed.push({ a, r, y: .3 + rand() * 1.4, s: .2 + rand() * .5, p: rand() * 10 }); }
+ffGeo.setAttribute('position', new THREE.BufferAttribute(ffArr, 3));
+const ffMat = new THREE.PointsMaterial({ size: .09, map: dotTex, color: 0xd8ff7a, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 });
+const fireflies = new THREE.Points(ffGeo, ffMat); fireflies.frustumCulled = false; scene.add(fireflies);
+// uccelli
+const birds = [];
+{
+  const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0, -1.1, 0, -.35, 0, 0, -.5]), 3)); wg.computeVertexNormals();
+  const bm = new THREE.MeshBasicMaterial({ color: 0x1b1d22, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+  for (let i = 0; i < 7; i++){
+    const g = new THREE.Group(), l = new THREE.Mesh(wg, bm), r = new THREE.Mesh(wg, bm); r.scale.x = -1; g.add(l, r);
+    g.userData = { l, r, rad: 45 + rand() * 30, h: 26 + rand() * 14, sp: .05 + rand() * .03, ph: rand() * 6 };
+    g.scale.setScalar(.9); scene.add(g); birds.push(g);
+  }
+}
+
+/* ===================== sole, colori del cielo, luci ===================== */
+function sunPosition(date, lat, lon){
+  const rad = Math.PI / 180, d = date.getTime() / 86400000 - 10957.5;
+  const g = (357.529 + .98560028 * d) * rad, q = 280.459 + .98564736 * d;
+  const L = (q + 1.915 * Math.sin(g) + .02 * Math.sin(2 * g)) * rad, e = (23.439 - .00000036 * d) * rad;
+  const RA = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)), dec = Math.asin(Math.sin(e) * Math.sin(L));
+  const GMST = ((18.697374558 + 24.06570982441908 * d) % 24 + 24) % 24;
+  const H = (GMST * 15 + lon) * rad - RA, la = lat * rad;
+  const el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(H));
+  const az = Math.atan2(-Math.sin(H), Math.tan(dec) * Math.cos(la) - Math.sin(la) * Math.cos(H));
+  return { el, az };
+}
+const SKY_KEYS = [
+  [-18, '#03050c', '#070b18'], [-9, '#0a1130', '#232745'], [-3, '#1e2b5a', '#b8634c'],
+  [2, '#3b62a3', '#f0a15e'], [9, '#3e7bcd', '#bcd2e6'], [40, '#2a66cc', '#a6c8ea']
+].map(k => ({ e: k[0], top: col(k[1]), hor: col(k[2]) }));
+const sc = { top: col(0), hor: col(0) };
+function skyAt(elev){
+  if (elev <= SKY_KEYS[0].e){ sc.top.copy(SKY_KEYS[0].top); sc.hor.copy(SKY_KEYS[0].hor); return; }
+  const last = SKY_KEYS[SKY_KEYS.length - 1];
+  if (elev >= last.e){ sc.top.copy(last.top); sc.hor.copy(last.hor); return; }
+  let i = 0; while (elev > SKY_KEYS[i + 1].e) i++;
+  const a = SKY_KEYS[i], b = SKY_KEYS[i + 1], t = smooth(a.e, b.e, elev);
+  sc.top.copy(a.top).lerp(b.top, t); sc.hor.copy(a.hor).lerp(b.hor, t);
+}
+let envOffset = 0, daySpeed = CONFIG.daySpeed;
+const envNow = () => new Date(Date.now() + envOffset);
+const sunDir = V3(), moonDir = V3(), GRAY = col('#8a929c'), GRAYH = col('#a7aeb6'), FOGC = col('#b9c0c6');
+const SUN_LOW = col('#ff9450'), SUN_HIGH = col('#fff3e2'), sunC = col(0), lin = col(0);
+let dayL = 1, night = 0, elevDeg = 30;
+
+function updateEnvironment(dt){
+  if (daySpeed !== 1) envOffset += dt * 1000 * (daySpeed - 1);
+  const { el, az } = sunPosition(envNow(), CONFIG.lat, CONFIG.lon);
+  elevDeg = el * 180 / Math.PI;
+  sunDir.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
+  dayL = smooth(-6, 10, elevDeg); night = 1 - smooth(-10, 0, elevDeg);
+
+  skyAt(elevDeg);
+  const g = GRAY.clone().multiplyScalar(.1 + .9 * dayL), gh = GRAYH.clone().multiplyScalar(.12 + .88 * dayL);
+  sc.top.lerp(g, W.cloud * .8); sc.hor.lerp(gh, W.cloud * .65);
+  sc.top.multiplyScalar(1 - .5 * W.storm); sc.hor.multiplyScalar(1 - .42 * W.storm);
+  const fogTint = FOGC.clone().multiplyScalar(.1 + .9 * dayL);
+  sc.hor.lerp(fogTint, W.fog * .7); sc.top.lerp(sc.hor, W.fog * .65);
+  if (flash > 0){ sc.top.r += flash * .55; sc.top.g += flash * .6; sc.top.b += flash * .75; sc.hor.r += flash * .4; sc.hor.g += flash * .45; sc.hor.b += flash * .55; }
+
+  skyU.uTop.value.copy(sc.top).convertSRGBToLinear();
+  skyU.uHor.value.copy(sc.hor).convertSRGBToLinear();
+  skyU.uBot.value.copy(sc.hor).multiplyScalar(.55).convertSRGBToLinear();
+  sunC.copy(SUN_LOW).lerp(SUN_HIGH, smooth(0, 25, elevDeg));
+  skyU.uSunCol.value.copy(sunC).convertSRGBToLinear().multiplyScalar(.7);
+  skyU.uSunDir.value.copy(sunDir);
+  skyU.uSunVis.value = smooth(-5, 1, elevDeg) * (1 - .92 * W.cloud) * (1 - .85 * W.fog);
+
+  // luce principale: sole di giorno, luna di notte
+  const p = (((Math.atan2(sunDir.x, -sunDir.z) * 180 / Math.PI) + 360) % 360) / 360; // azimut del sole 0..1
+  const np = (p + .5) % 1;
+  moonDir.set(.6 - 1.2 * np, .18 + .32 * Math.sin(np * Math.PI), -1).normalize();
+  if (elevDeg > -2){
+    key.position.copy(sunDir).multiplyScalar(50).add(key.target.position);
+    key.color.copy(sunC);
+    key.intensity = 2.5 * smooth(-2, 14, elevDeg) * (1 - .8 * W.cloud) * (1 - .6 * W.fog) + flash * 3;
+  } else {
+    key.position.copy(moonDir).multiplyScalar(50).add(key.target.position);
+    key.color.set(0xa9bcff);
+    key.intensity = .38 * night * (1 - .85 * W.cloud) + flash * 3;
+  }
+  lin.copy(sc.top).lerp(sc.hor, .5).convertSRGBToLinear();
+  hemi.color.copy(lin);
+  hemi.groundColor.setRGB(.05, .045, .03).lerp(col(0x9aa0aa), snowU.value * .5);
+  hemi.intensity = .18 + .35 * dayL + flash * 1.5;
+  renderer.toneMappingExposure = lerp(1.35, 1.0, dayL);
+
+  scene.fog.color.copy(sc.hor).convertSRGBToLinear();
+  scene.fog.density = .0022 + W.fog * .032 + W.rain * .006 + W.snow * .009;
+
+  starMat.opacity = night * (1 - W.cloud) * (1 - W.fog) * .95;
+  stars.position.copy(camera.position); stars.rotation.y = simT * .002;
+  sky.position.copy(camera.position);
+  const mv = night * (1 - .9 * W.cloud) * (1 - W.fog);
+  moon.position.copy(camera.position).addScaledVector(moonDir, 780); moon.material.opacity = mv; moon.visible = mv > .01;
+  moonGlow.position.copy(moon.position); moonGlow.material.opacity = mv * .35; moonGlow.visible = moon.visible;
+
+  const darkness = Math.max(night, (1 - dayL) * .5, W.storm * .55 * W.cloud, W.fog * .3 * (1 - dayL * .5));
+  const lampOn = smooth(.35, .7, darkness);
+  lampLight.intensity = lampOn * 2.4; lanternGlass.emissiveIntensity = lampOn * 1.1;
+  lampHalo.material.opacity = lampOn * (.45 + W.fog * .4 + W.rain * .2); lampHalo.scale.setScalar(1.4 + W.fog * 2.5);
+  interiorLight.intensity = .35 + 1.1 * night + .3 * W.storm;
+
+  envTimer -= dt;
+  if (envTimer <= 0){ refreshEnv(); envTimer = flash > 0 ? .25 : 10; }
+}
+
+let boltT = 0, nextStrike = 4;
+function updateWeatherFX(dt, t){
+  const k = 1 - Math.exp(-dt * .3);
+  for (const n of ['cloud', 'rain', 'snow', 'fog', 'storm', 'wind']) W[n] += (WT[n] - W[n]) * k;
+  windDir.lerp(windDirT, k).normalize();
+  snowU.value = damp(snowU.value, W.snow > .2 ? 1 : 0, W.snow > .2 ? .06 : .02, dt);
+  wet = damp(wet, W.rain > .1 ? 1 : 0, W.rain > .1 ? .15 : .03, dt);
+  groundMat.roughness = lerp(.95, .55, wet); groundMat.color.setScalar(1 - .22 * wet);
+  plazaMat.roughness = lerp(.85, .18, wet); plazaMat.color.setScalar(1 - .3 * wet);
+
+  grassU.uTime.value = t; grassU.uWind.value = W.wind; grassU.uWindDir.value.copy(windDir);
+  for (const tr of trees){
+    const u = tr.userData, sw = (.004 + W.wind * .0035) / u.stiff;
+    tr.rotation.z = Math.sin(t * (.9 + W.wind * .05) + u.ph) * sw * windDir.x + sw * .6 * windDir.x;
+    tr.rotation.x = Math.sin(t * (.8 + W.wind * .05) + u.ph * 1.3) * sw * windDir.y + sw * .6 * windDir.y;
+  }
+
+  // pioggia
+  const rc = Math.floor(RN * clamp(W.rain, 0, 1)); rainGeo.setDrawRange(0, rc * 2);
+  if (rc > 0){
+    const vx = windDir.x * W.wind * .4, vz = windDir.y * W.wind * .4, cx = camera.position.x;
+    for (let i = 0; i < rc; i++){
+      const j = i * 3; let x = rainP[j], y = rainP[j + 1], z = rainP[j + 2]; const v = rainVel[i];
+      y -= v * dt; x += vx * dt; z += vz * dt;
+      if (y < 0){ y = 13 + Math.random() * 3; x = cx + (Math.random() - .5) * 30; z = -15 + Math.random() * 20; }
+      if (x > cx + 15) x -= 30; else if (x < cx - 15) x += 30;
+      if (z > 5) z -= 20; else if (z < -15) z += 20;
+      rainP[j] = x; rainP[j + 1] = y; rainP[j + 2] = z;
+      const o = i * 6; rainArr[o] = x; rainArr[o + 1] = y; rainArr[o + 2] = z;
+      rainArr[o + 3] = x - vx * .03; rainArr[o + 4] = y + v * .03; rainArr[o + 5] = z - vz * .03;
+    }
+    rainGeo.attributes.position.needsUpdate = true;
+  }
+  rainMat.opacity = .25 + .3 * W.rain; rainMat.color.setScalar(.35 + .45 * dayL + flash);
+
+  // neve
+  const scn = Math.floor(SN * clamp(W.snow, 0, 1)); snowGeo.setDrawRange(0, scn);
+  if (scn > 0){
+    const vx = windDir.x * W.wind * .35, vz = windDir.y * W.wind * .35;
+    for (let i = 0; i < scn; i++){
+      const j = i * 3;
+      snowArr[j + 1] -= snowVel[i] * dt;
+      snowArr[j] += (vx + Math.sin(t * 1.3 + i) * .35) * dt;
+      snowArr[j + 2] += (vz + Math.cos(t * 1.1 + i * .7) * .25) * dt;
+      if (snowArr[j + 1] < 0){ snowArr[j + 1] = 12 + Math.random() * 2; snowArr[j] = (Math.random() - .5) * 30; snowArr[j + 2] = -15 + Math.random() * 20; }
+      if (snowArr[j] > 15) snowArr[j] -= 30; else if (snowArr[j] < -15) snowArr[j] += 30;
+      if (snowArr[j + 2] > 5) snowArr[j + 2] -= 20; else if (snowArr[j + 2] < -15) snowArr[j + 2] += 20;
+    }
+    snowGeo.attributes.position.needsUpdate = true;
+  }
+  snowMat.color.setScalar(.45 + .55 * dayL);
+
+  // nuvole
+  const cTint = col(0).copy(sc.hor).lerp(col('#ffffff'), .55 * dayL).multiplyScalar(.35 + .65 * dayL).lerp(col('#4b5058'), W.storm * .6);
+  for (const s of clouds){
+    const u = s.userData;
+    s.material.opacity = clamp((W.cloud - u.th) * 2.6, 0, 1) * .92 * (1 - W.fog * .6);
+    s.material.color.copy(cTint);
+    if (flash > 0) s.material.color.offsetHSL(0, 0, flash * .4);
+    s.position.x += (windDir.x >= 0 ? 1 : -1) * (1 + W.wind * .9) * u.sp * dt;
+    if (s.position.x > 400) s.position.x -= 800; else if (s.position.x < -400) s.position.x += 800;
+  }
+
+  // fulmini
+  flash = Math.max(0, flash - dt * 3.2);
+  if (W.storm > .5){
+    nextStrike -= dt;
+    if (nextStrike <= 0){
+      flash = 1; strikeBolt(); boltT = .22;
+      setTimeout(() => { flash = Math.max(flash, .7); }, 110 + Math.random() * 120);
+      nextStrike = 3 + Math.random() * 9; envTimer = 0;
+    }
+  }
+  boltT -= dt; bolt.material.opacity = boltT > 0 ? 1 : 0;
+
+  // lucciole
+  const ffv = night * (1 - W.rain) * (1 - W.snow) * (1 - W.storm) * smooth(10, 16, tempC);
+  ffMat.opacity = ffv; fireflies.visible = ffv > .01;
+  if (fireflies.visible){
+    for (let i = 0; i < FF; i++){
+      const f = ffSeed[i], a = f.a + t * f.s * .15;
+      ffArr[i * 3] = Math.cos(a) * f.r + Math.sin(t * .7 + f.p) * .4;
+      ffArr[i * 3 + 1] = f.y + Math.sin(t * 1.3 + f.p) * .25;
+      ffArr[i * 3 + 2] = Math.sin(a) * f.r - 1;
+    }
+    ffGeo.attributes.position.needsUpdate = true;
+    ffMat.size = .07 + .04 * Math.sin(t * 3);
+  }
+
+  // uccelli
+  const bv = dayL * (1 - W.rain) * (1 - W.snow) * (1 - W.storm) * (1 - W.fog) * smooth(9, 5, W.wind);
+  for (const b of birds){
+    const u = b.userData, a = u.ph + t * u.sp;
+    b.position.set(Math.cos(a) * u.rad, u.h + Math.sin(t * .3 + u.ph) * 3, -90 + Math.sin(a) * u.rad * .6);
+    b.rotation.y = -a + Math.PI;
+    const fl = Math.sin(t * 9 + u.ph * 5) * .6;
+    u.l.rotation.z = fl; u.r.rotation.z = -fl;
+    u.l.material.opacity = bv; b.visible = bv > .02;
+  }
+}
+
+/* ===================== meteo reale (Open-Meteo, nessuna chiave) ===================== */
+const $ = id => document.getElementById(id);
+const hud = $('hud'); if (!CONFIG.showHud) hud.classList.add('hidden');
+let demo = null;
+function wmo(code){
+  if (code === 0) return ['Sereno', { cloud: .05 }];
+  if (code === 1) return ['Poco nuvoloso', { cloud: .3 }];
+  if (code === 2) return ['Parzialmente nuvoloso', { cloud: .55 }];
+  if (code === 3) return ['Coperto', { cloud: .95 }];
+  if (code === 45 || code === 48) return ['Nebbia', { cloud: .7, fog: 1 }];
+  if (code >= 51 && code <= 57) return ['Pioviggine', { cloud: .9, rain: .3, fog: .25 }];
+  if (code >= 61 && code <= 67) return ['Pioggia', { cloud: .97, rain: code <= 61 ? .45 : code <= 63 ? .7 : 1 }];
+  if (code >= 71 && code <= 77) return ['Neve', { cloud: .92, snow: code <= 71 ? .4 : code <= 73 ? .7 : 1 }];
+  if (code >= 80 && code <= 82) return ['Rovesci', { cloud: .9, rain: .55 + .2 * (code - 80) }];
+  if (code === 85 || code === 86) return ['Rovesci di neve', { cloud: .9, snow: code === 85 ? .5 : .9 }];
+  if (code >= 95) return ['Temporale', { cloud: 1, rain: 1, storm: 1 }];
+  return ['Variabile', { cloud: .5 }];
+}
+const DIRS = ['nord', 'nord-est', 'est', 'sud-est', 'sud', 'sud-ovest', 'ovest', 'nord-ovest'];
+function setTarget(p, windMs, windFromDeg){
+  Object.assign(WT, { cloud: 0, rain: 0, snow: 0, fog: 0, storm: 0 }, p);
+  if (windMs != null) WT.wind = windMs;
+  if (windFromDeg != null){ const a = (windFromDeg + 180) * Math.PI / 180; windDirT.set(Math.sin(a), -Math.cos(a)); }
+}
+let first = true;
+async function fetchWeather(){
+  if (demo) return;
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${CONFIG.lat}&longitude=${CONFIG.lon}` +
+      `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timezone=auto`;
+    const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
+    const c = (await r.json()).current;
+    const [label, p] = wmo(c.weather_code);
+    if (c.cloud_cover != null && c.weather_code !== 0) p.cloud = Math.max(p.cloud || 0, c.cloud_cover / 100);
+    setTarget(p, c.wind_speed_10m, c.wind_direction_10m);
+    tempC = c.temperature_2m;
+    if (first){ Object.assign(W, WT); windDir.copy(windDirT); snowU.value = W.snow > .2 ? 1 : 0; wet = W.rain > .1 ? 1 : 0; first = false; envTimer = 0; }
+    $('wTemp').textContent = Math.round(c.temperature_2m) + '°';
+    $('wCond').textContent = label;
+    const kmh = Math.round(c.wind_speed_10m * 3.6);
+    const dir = DIRS[Math.round(((c.wind_direction_10m % 360) + 360) % 360 / 45) % 8];
+    const tm = new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+    $('wMeta').textContent = `Vento ${kmh} km/h da ${dir}, aggiornato alle ${tm}`;
+  } catch (e) {
+    $('wCond').textContent = 'Meteo non raggiungibile';
+    $('wMeta').textContent = 'Riprovo tra un minuto. Controlla la connessione.';
+    setTimeout(fetchWeather, 60000);
+  }
+}
+function setDemo(name){
+  demo = name;
+  if (!name){ $('wMeta').textContent = ''; first = false; fetchWeather(); return; }
+  setTarget(PRESETS[name], PRESETS[name].wind, 250);
+  $('wCond').textContent = PRESET_LABEL[name] + ' (prova)';
+  $('wMeta').textContent = 'Premi 0 per tornare al meteo reale';
+}
+if (CONFIG.forcedWeather && PRESETS[CONFIG.forcedWeather]){ setDemo(CONFIG.forcedWeather); Object.assign(W, WT); }
+else fetchWeather();
+setInterval(fetchWeather, CONFIG.weatherRefreshMin * 60000);
+if (CONFIG.useGeolocation && navigator.geolocation){
+  navigator.geolocation.getCurrentPosition(pos => {
+    CONFIG.lat = pos.coords.latitude; CONFIG.lon = pos.coords.longitude; first = true; fetchWeather();
+  }, () => {}, { timeout: 10000, maximumAge: 3600000 });
+}
+
+/* ===================== input ===================== */
+const KEYMAP = { '1': 'sereno', '2': 'nuvoloso', '3': 'pioggia', '4': 'temporale', '5': 'neve', '6': 'nebbia' };
+addEventListener('keydown', e => {
+  if (KEYMAP[e.key]) setDemo(KEYMAP[e.key]);
+  else if (e.key === '0') setDemo(null);
+  else if (e.key === 'h' || e.key === 'H') hud.classList.toggle('hidden');
+  else if (e.key === 'g' || e.key === 'G'){ daySpeed = daySpeed === 1 ? 720 : 1; if (daySpeed === 1) envOffset = 0; }
+  else if (e.key === '?') $('help').classList.toggle('show');
+});
+renderer.domElement.addEventListener('pointerup', () => hud.classList.toggle('hidden'));
+let mx = 0, my = 0;
+addEventListener('pointermove', e => { mx = e.clientX / innerWidth - .5; my = e.clientY / innerHeight - .5; });
+
+function onResize(){
+  const a = innerWidth / innerHeight;
+  camera.aspect = a; camera.fov = a < 1 ? clamp(34 / a * .85, 34, 70) : 34;
+  camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', onResize); onResize();
+
+/* ===================== ciclo principale ===================== */
+let last = performance.now();
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.1, (now - last) / 1000); last = now; simT += dt;
+
+  const sway = REDUCED_MOTION ? 0 : 1;
+  camera.position.set(
+    CAM_BASE.x + (Math.sin(simT * .05) * .25 + mx * .35) * sway,
+    CAM_BASE.y + (Math.sin(simT * .07) * .04 - my * .15) * sway + (flash > .8 ? (Math.random() - .5) * .01 : 0),
+    CAM_BASE.z);
+  camera.lookAt(CAM_LOOK);
+
+  updateWeatherFX(dt, simT);
+  updateEnvironment(dt);
+  runTasks(dt);
+  updateRig(dt);
+  if (faceDirty) renderFace();
+  renderer.render(scene, camera);
+}
+refreshEnv();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
