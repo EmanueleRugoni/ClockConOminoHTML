@@ -69,7 +69,8 @@
   <b>Tasti</b><br>
   1 sereno, 2 nuvoloso, 3 pioggia, 4 temporale, 5 neve, 6 nebbia, 0 meteo reale<br>
   T cambia stagione, G giornata accelerata, B pausa dell'omino<br>
-  S suoni, P effetti cinema, H mostra o nasconde il meteo, ? questo aiuto
+  S suoni, P effetti cinema, H o doppio clic mostra o nasconde il meteo, ? questo aiuto<br>
+  Muovi il mouse o tocca lo schermo: l'omino ti segue con lo sguardo
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -83,6 +84,9 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/BokehPass.js"></script>
+<!-- caricamento del personaggio umano (omino.glb), facoltativo -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
 <script>
 "use strict";
 /* =====================================================================
@@ -101,7 +105,9 @@ const CONFIG = {
   daySpeed: num('speed', 1),          // >1 accelera solo il ciclo del giorno (es. 720)
   fx: P.get('fx') !== '0',            // bloom + profondità di campo (solo qualità alta)
   sound: P.get('audio') === '1',      // ?audio=1 per partire con i suoni (serve un tocco, o Chromium in kiosk)
-  season: P.get('stagione')           // inverno | primavera | estate | autunno (altrimenti dalla data)
+  season: P.get('stagione'),          // inverno | primavera | estate | autunno (altrimenti dalla data)
+  model: P.get('modello') || 'omino.glb', // personaggio umano accanto a index.html; ?modello=0 per l'omino geometrico
+  modelHeight: num('altezza', 1.8)    // altezza del personaggio in metri
 };
 const LOW = CONFIG.quality === 'low';
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -689,6 +695,136 @@ function renderFace(){
   faceDirty = fading;
 }
 
+/* ===================== personaggio umano (.glb con scheletro) ===================== */
+// Funziona con scheletri Mixamo, MakeHuman "game engine", Rigify e simili: cerca le ossa per nome.
+const HUMAN = { ok: false, root: null, B: {}, rest: new Map(), base: V3(), L1: L1, L2: L2, blink: [], jaw: [] };
+const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion(), _qI = new THREE.Quaternion();
+const _v1 = V3(), _v2 = V3(), _v3 = V3(), _e = new THREE.Euler();
+function findBone(list, keys){
+  for (const k of keys){ const b = list.find(x => x.n === k || x.n.endsWith(k)); if (b) return b.bone; }
+  return null;
+}
+function rotateBoneWorld(bone, dq){
+  bone.getWorldQuaternion(_q2); _q2.premultiply(dq);
+  bone.parent.getWorldQuaternion(_q3).invert();
+  bone.quaternion.copy(_q3.multiply(_q2));
+  bone.updateMatrixWorld(true);
+}
+function aimBone(bone, child, targetW){
+  if (!child) return;
+  bone.getWorldPosition(_v1); child.getWorldPosition(_v2);
+  _v2.sub(_v1).normalize(); _v3.copy(targetW).sub(_v1).normalize();
+  rotateBoneWorld(bone, _q1.setFromUnitVectors(_v2, _v3));
+}
+const toW = v => v.clone().add(clock.position);   // l'orologio non è ruotato: locale -> mondo è una traslazione
+const firstBoneChild = b => b && b.children.find(c => c.isBone);
+function loadHuman(){
+  if (!THREE.GLTFLoader || CONFIG.model === '0') return;
+  const loader = new THREE.GLTFLoader();
+  if (THREE.DRACOLoader){
+    const d = new THREE.DRACOLoader(); d.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.4.1/'); loader.setDRACOLoader(d);
+  }
+  loader.load(CONFIG.model, g => setupHuman(g.scene), undefined,
+    () => console.info(`Nessun modello "${CONFIG.model}": uso l'omino geometrico.`));
+}
+function setupHuman(root){
+  const list = [];
+  root.traverse(o => {
+    if (o.isBone) list.push({ bone: o, n: o.name.toLowerCase().replace(/[^a-z0-9]/g, '') });
+    if (o.isMesh){
+      o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false;
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { if ('envMapIntensity' in m) m.envMapIntensity = .45; });
+      if (o.morphTargetDictionary) for (const [k, i] of Object.entries(o.morphTargetDictionary)){
+        const n = k.toLowerCase();
+        if (/blink|eyesclosed|eyeclose/.test(n)) HUMAN.blink.push([o, i]);
+        else if (/jawopen|mouthopen|yawn|^aa$|visemeaa|viseme_aa/.test(n)) HUMAN.jaw.push([o, i]);
+      }
+    }
+  });
+  const side = (s, l) => ({
+    up: findBone(list, s === 'r' ? ['rightarm', 'upperarmr', 'upperarm01r', 'rupperarm', 'rightupperarm', 'upperarmright'] : ['leftarm', 'upperarml', 'upperarm01l', 'lupperarm', 'leftupperarm', 'upperarmleft']),
+    fo: findBone(list, s === 'r' ? ['rightforearm', 'lowerarmr', 'lowerarm01r', 'forearmr', 'rightlowerarm', 'rforearm', 'lowerarmright'] : ['leftforearm', 'lowerarml', 'lowerarm01l', 'forearml', 'leftlowerarm', 'lforearm', 'lowerarmleft']),
+    ha: findBone(list, s === 'r' ? ['righthand', 'handr', 'wristr', 'rhand', 'handright'] : ['lefthand', 'handl', 'wristl', 'lhand', 'handleft'])
+  });
+  let R_ = side('r'), L_ = side('l');
+  // il pennarello va nella mano sul lato +X (a destra per chi guarda): se serve scambio i lati
+  if (R_.up && L_.up){ root.updateMatrixWorld(true); if (R_.up.getWorldPosition(V3()).x < L_.up.getWorldPosition(V3()).x) [R_, L_] = [L_, R_]; }
+  const B = HUMAN.B = {
+    upR: R_.up, foR: R_.fo, haR: R_.ha, upL: L_.up, foL: L_.fo, haL: L_.ha,
+    head: findBone(list, ['head']), neck: findBone(list, ['neck', 'neck01', 'neck1']),
+    spine: findBone(list, ['spine2', 'spine03', 'spine3', 'upperchest', 'chest', 'spine02', 'spine1', 'spine'])
+  };
+  if (!B.upR || !B.foR || !B.haR || !B.upL || !B.foL || !B.haL || !B.head){
+    console.warn("Il modello non ha ossa riconoscibili per braccia e testa: uso l'omino geometrico."); return;
+  }
+  clock.add(root); root.updateMatrixWorld(true);
+  // misuro l'altezza dalle ossa (più affidabile del bounding box delle mesh con skinning)
+  const boneSpan = () => {
+    let lo = Infinity, hi = -Infinity;
+    for (const x of list){ const y = x.bone.getWorldPosition(_v1).y; lo = Math.min(lo, y); hi = Math.max(hi, y); }
+    return { lo, hi };
+  };
+  const hasTop = list.some(x => /headtop|headend|headtip/.test(x.n));
+  let sp = boneSpan();
+  root.scale.multiplyScalar(CONFIG.modelHeight / Math.max((sp.hi - sp.lo) * (hasTop ? 1 : 1.08), 1e-6));
+  root.updateMatrixWorld(true);
+  sp = boneSpan();
+  const hipsX = (B.upR.getWorldPosition(V3()).x + B.upL.getWorldPosition(V3()).x) / 2;
+  root.position.x -= hipsX - clock.position.x;
+  root.position.y += clock.position.y + .28 - sp.lo;       // piedi dentro la cassa, spalle dietro il quadrante
+  root.updateMatrixWorld(true);
+  const sh = worldOf(B.upR, V3());
+  root.position.z += -.07 - sh.z;
+  root.updateMatrixWorld(true);
+  HUMAN.base.copy(root.position); HUMAN.root = root;
+  for (const b of Object.values(B)) if (b) HUMAN.rest.set(b, b.quaternion.clone());
+  HUMAN.L1 = B.upR.getWorldPosition(V3()).distanceTo(B.foR.getWorldPosition(V3()));
+  HUMAN.L2 = B.foR.getWorldPosition(V3()).distanceTo(B.haR.getWorldPosition(V3()));
+  // nascondo l'omino geometrico (pennarello, panno e tazza restano)
+  torso.visible = false;
+  for (const a of [armR, armL]) for (const k of ['upper', 'fore', 'cuff', 'elbow', 'hand']) a[k].visible = false;
+  if (bokehPass) bokehPass.materialDepth.skinning = true;
+  HUMAN.ok = true;
+  console.info(`Personaggio "${CONFIG.model}" caricato.`);
+}
+function poseHuman(){
+  const B = HUMAN.B;
+  for (const [b, q] of HUMAN.rest) b.quaternion.copy(q);
+  HUMAN.root.position.set(HUMAN.base.x + torso.position.x, HUMAN.base.y + torso.position.y - 1.27, HUMAN.base.z + torso.position.z + .07);
+  HUMAN.root.updateMatrixWorld(true);
+  if (B.spine) rotateBoneWorld(B.spine, _q1.setFromEuler(_e.set(torso.rotation.x, 0, torso.rotation.z)));
+}
+function armHuman(up, fo, ha, elbowL, wristL, aimL){
+  aimBone(up, fo, toW(elbowL));
+  aimBone(fo, ha, toW(wristL));
+  aimBone(ha, firstBoneChild(ha), toW(aimL));
+}
+function lookHuman(lookL){
+  const B = HUMAN.B;
+  B.head.getWorldPosition(_v1);
+  const dir = toW(lookL).sub(_v1).normalize();
+  const full = new THREE.Quaternion().setFromUnitVectors(_v3.set(0, 0, 1), dir);
+  const ang = 2 * Math.acos(clamp(full.w, -1, 1)), lim = 1.1;
+  if (ang > lim) full.slerp(_qI, 1 - lim / ang);
+  if (B.neck){ rotateBoneWorld(B.neck, new THREE.Quaternion().slerp(full, .4)); rotateBoneWorld(B.head, new THREE.Quaternion().slerp(full, .6)); }
+  else rotateBoneWorld(B.head, full);
+}
+function getMouth(out){
+  if (HUMAN.ok){ HUMAN.B.head.getWorldPosition(out); clock.worldToLocal(out); return out.add(tmpB.set(0, .04, .095)); }
+  return worldOf(mouth, out);
+}
+
+/* ===================== il viso segue il mouse (o il dito sul display) ===================== */
+const mouseLook = V3(0, FACE_Y, 1.5); let mouseLookT = 0;
+const _ray = new THREE.Raycaster(), _plane = new THREE.Plane(V3(0, 0, 1), -1.3), _ndc = new THREE.Vector2();
+function pointToLook(e){
+  _ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  _ray.setFromCamera(_ndc, camera);
+  if (_ray.ray.intersectPlane(_plane, _v1)){ mouseLook.copy(clock.worldToLocal(_v1.clone())); mouseLookT = 5; }
+}
+addEventListener('pointermove', pointToLook);
+addEventListener('pointerdown', pointToLook);
+
 /* ===================== vetro bagnato ===================== */
 const drops = []; let cond = 0, condT = 0, glassAcc = 0, maskAcc = 0, spawnAcc = 0, glassClean = true;
 const GX = x => GL / 2 + x / FACE_R * GL / 2, GY = y => GL / 2 - y / FACE_R * GL / 2;
@@ -820,7 +956,7 @@ function taskCoffee(){
     t: 0, start(){},
     update(dt){
       const t = this.t += dt; rig.mode = 'coffee'; rig.clothK = 5.5;
-      worldOf(mouth, mouthP);
+      getMouth(mouthP);
       if (t < 1.1){ tgt.copy(CLOTH_HOME); rig.lookOverride = CLOTH_HOME; }
       else if (t < 2.2){ rig.clothOnShelf = true; tgt.copy(CUP_HOME); rig.lookOverride = CUP_HOME; }
       else if (t < 3.4){ rig.cupHeld = true; tgt.copy(mouthP).add(tmpB.set(-.01, -.07, .1)); rig.lookOverride = null; }
@@ -901,20 +1037,25 @@ function updateRig(dt){
   torso.rotation.x = damp(torso.rotation.x, act ? .06 + Math.max(0, 1.27 - torso.position.y) * .9 : stretching ? -.13 : .02, 3, dt);
   torso.updateMatrixWorld(true);
 
+  const H = HUMAN.ok, l1 = H ? HUMAN.L1 : L1, l2 = H ? HUMAN.L2 : L2;
+  if (H) poseHuman();
+
   // braccio destro + pennarello
-  worldOf(shoulderR, shTmp);
+  worldOf(H ? HUMAN.B.upR : shoulderR, shTmp);
   penDir.subVectors(rig.penTip, shTmp).normalize().multiplyScalar(.6).add(tmpA.set(0, 0, 1)).normalize();
   const wristTarget = tmpC.copy(rig.penTip).addScaledVector(penDir, -.13).clone();
-  solveIK(shTmp, wristTarget, L1, L2, poleR, armR.elbowP, armR.wristP);
-  applyArm(armR, shTmp);
+  solveIK(shTmp, wristTarget, l1, l2, poleR, armR.elbowP, armR.wristP);
+  if (H) armHuman(HUMAN.B.upR, HUMAN.B.foR, HUMAN.B.haR, armR.elbowP, armR.wristP, rig.penTip);
+  else applyArm(armR, shTmp);
   placeLimb(pen, armR.wristP, tmpB.copy(armR.wristP).addScaledVector(penDir, .135));
   penCap.position.copy(armR.wristP).addScaledVector(penDir, -.01); penCap.quaternion.copy(pen.quaternion);
 
   // braccio sinistro + panno
-  worldOf(shoulderL, shTmp);
+  worldOf(H ? HUMAN.B.upL : shoulderL, shTmp);
   const wl = V3(rig.cloth.x - .01, rig.cloth.y - .015, rig.cloth.z - .055);
-  solveIK(shTmp, wl, L1, L2, poleL, armL.elbowP, armL.wristP);
-  applyArm(armL, shTmp);
+  solveIK(shTmp, wl, l1, l2, poleL, armL.elbowP, armL.wristP);
+  if (H) armHuman(HUMAN.B.upL, HUMAN.B.foL, HUMAN.B.haL, armL.elbowP, armL.wristP, rig.cloth);
+  else applyArm(armL, shTmp);
   if (rig.clothOnShelf){ cloth.position.copy(CLOTH_HOME).add(tmpB.set(0, .005, 0)); cloth.rotation.set(Math.PI / 2, 0, .4); }
   else {
     cloth.position.set(armL.wristP.x + .01, armL.wristP.y + .015, armL.wristP.z + .05); cloth.rotation.set(0, 0, Math.sin(simT * 7) * (rig.mode === 'cloth' ? .25 : .05));
@@ -931,22 +1072,30 @@ function updateRig(dt){
   });
   rig.yawn = damp(rig.yawn, rig.yawnT, 4, dt);
   mouth.scale.set(1 + rig.yawn * .4, 1 + rig.yawn * 7, 1);
+  for (const [m, i] of HUMAN.jaw) m.morphTargetInfluences[i] = rig.yawn * .9;
 
   // sguardo
   lookCamT -= dt;
   if (lookCamT <= 0){ lookingCam = !lookingCam; lookCamT = lookingCam ? 2.5 + Math.random() * 2 : 7 + Math.random() * 8; }
   const look = tmpA;
+  mouseLookT -= dt;
+  const followMouse = mouseLookT > 0;
   if (rig.lookOverride) look.copy(rig.lookOverride);
-  else if (act) look.copy(act);
+  else if (act){ look.copy(act); if (followMouse) look.lerp(mouseLook, .3); }   // al lavoro lancia solo un'occhiata
+  else if (followMouse) look.copy(mouseLook);
   else if (lookingCam) look.copy(clock.worldToLocal(camera.position.clone()));
   else look.set(0, FACE_Y + .05, .3);
-  rig.look.lerp(look, 1 - Math.exp(-dt * 5));
-  const q0 = qTmp.copy(head.quaternion);
-  head.lookAt(clock.localToWorld(rig.look.clone()));
-  const qT = head.quaternion.clone(); head.quaternion.copy(q0).slerp(qT, 1 - Math.exp(-dt * 6));
+  rig.look.lerp(look, 1 - Math.exp(-dt * (followMouse && !act ? 7 : 5)));
+  if (H) lookHuman(rig.look);
+  else {
+    const q0 = qTmp.copy(head.quaternion);
+    head.lookAt(clock.localToWorld(rig.look.clone()));
+    const qT = head.quaternion.clone(); head.quaternion.copy(q0).slerp(qT, 1 - Math.exp(-dt * 6));
+  }
 
   blinkT -= dt; if (blinkT <= 0) blinkT = 2.5 + Math.random() * 4;
   const bl = blinkT < .12 ? .12 : 1; for (const e of eyes) e.scale.y = bl;
+  for (const [m, i] of HUMAN.blink) m.morphTargetInfluences[i] = bl < 1 ? 1 : 0;
 }
 function applyArm(a, sh){
   placeLimb(a.upper, sh, a.elbowP);
@@ -1478,7 +1627,7 @@ addEventListener('keydown', e => {
 });
 function toggleHud(){ const h = hud.classList.toggle('hidden'); soundBtn.classList.toggle('hidden', h); }
 if (!CONFIG.showHud) soundBtn.classList.add('hidden');
-renderer.domElement.addEventListener('pointerup', toggleHud);
+renderer.domElement.addEventListener('dblclick', toggleHud);   // un tocco = l'omino ti guarda, doppio tocco = mostra/nasconde il meteo
 let mx = 0, my = 0;
 addEventListener('pointermove', e => { mx = e.clientX / innerWidth - .5; my = e.clientY / innerHeight - .5; });
 
@@ -1529,6 +1678,7 @@ function skyLine(){
   if (txt !== skyText){ skyText = txt; document.getElementById('wSky').textContent = txt; }
 }
 setupFX(); onResize();
+loadHuman();
 refreshEnv();
 requestAnimationFrame(frame);
 </script>
