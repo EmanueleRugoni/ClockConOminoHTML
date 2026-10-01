@@ -33,6 +33,19 @@
     opacity: 0; transition: opacity .4s ease; pointer-events: none;
   }
   #help.show { opacity: 1; }
+  #sound {
+    position: fixed; right: calc(18px + env(safe-area-inset-right, 0px)); top: calc(14px + env(safe-area-inset-top, 0px));
+    width: 42px; height: 42px; border-radius: 50%; cursor: pointer; padding: 0;
+    display: grid; place-items: center; color: #f4ecdc;
+    background: rgba(12,14,20,.4); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border: 1px solid rgba(244,236,220,.22); transition: opacity .8s ease, background .3s ease;
+  }
+  #sound:hover { background: rgba(12,14,20,.6); }
+  #sound:focus-visible { outline: 2px solid #f4ecdc; outline-offset: 3px; }
+  #sound .on { display: none; }
+  #sound[aria-pressed="true"] .on { display: block; }
+  #sound[aria-pressed="true"] .off { display: none; }
+  #sound.hidden { opacity: 0; pointer-events: none; }
   #help b { font-weight: 300; font-style: italic; }
   @media (prefers-reduced-motion: reduce) { #hud, #help { transition: none; } }
 </style>
@@ -43,14 +56,33 @@
   <div class="temp" id="wTemp">--°</div>
   <div class="cond" id="wCond">Sto leggendo il meteo…</div>
   <div class="meta" id="wMeta"></div>
+  <div class="meta" id="wSky"></div>
 </div>
+<button id="sound" type="button" aria-pressed="false" aria-label="Attiva i suoni" title="Suoni (S)">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/>
+    <g class="on"><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18 6.5a8 8 0 0 1 0 11"/></g>
+    <g class="off"><path d="M16 9.5l5 5M21 9.5l-5 5"/></g>
+  </svg>
+</button>
 <div id="help">
   <b>Tasti</b><br>
   1 sereno, 2 nuvoloso, 3 pioggia, 4 temporale, 5 neve, 6 nebbia, 0 meteo reale<br>
-  G giornata accelerata, H mostra o nasconde il meteo, ? questo aiuto
+  T cambia stagione, G giornata accelerata, B pausa dell'omino<br>
+  S suoni, P effetti cinema, H mostra o nasconde il meteo, ? questo aiuto
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- post-processing (bloom + profondità di campo). Se non si caricano, la pagina funziona lo stesso -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/BokehShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/GammaCorrectionShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/BokehPass.js"></script>
 <script>
 "use strict";
 /* =====================================================================
@@ -66,7 +98,10 @@ const CONFIG = {
   quality: P.get('q') === 'low' ? 'low' : 'high',
   showHud: P.get('hud') !== '0',
   forcedWeather: P.get('meteo'),      // sereno | nuvoloso | pioggia | temporale | neve | nebbia
-  daySpeed: num('speed', 1)           // >1 accelera solo il ciclo del giorno (es. 720)
+  daySpeed: num('speed', 1),          // >1 accelera solo il ciclo del giorno (es. 720)
+  fx: P.get('fx') !== '0',            // bloom + profondità di campo (solo qualità alta)
+  sound: P.get('audio') === '1',      // ?audio=1 per partire con i suoni (serve un tocco, o Chromium in kiosk)
+  season: P.get('stagione')           // inverno | primavera | estate | autunno (altrimenti dalla data)
 };
 const LOW = CONFIG.quality === 'low';
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -157,7 +192,7 @@ function makeDot(){
 function makeCloud(){
   const c = document.createElement('canvas'); c.width = 512; c.height = 256; const g = c.getContext('2d');
   for (let i = 0; i < 26; i++){
-    const x = 90 + rand() * 330, y = 110 + (rand() - .5) * 70 - Math.sin((x - 90) / 330 * Math.PI) * 30, rr = 40 + rand() * 70;
+    const x = 105 + rand() * 300, y = 150 + (rand() - .5) * 30 - Math.sin((x - 105) / 300 * Math.PI) * 25, rr = 35 + rand() * 38;
     const r = g.createRadialGradient(x, y, 0, x, y, rr);
     r.addColorStop(0, 'rgba(255,255,255,.55)'); r.addColorStop(.6, 'rgba(255,255,255,.22)'); r.addColorStop(1, 'rgba(255,255,255,0)');
     g.fillStyle = r; g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.fill();
@@ -172,7 +207,7 @@ function makeMoon(){
     g.fillStyle = `rgba(120,118,112,${.12 + rand() * .2})`;
     g.beginPath(); g.arc(128 + Math.cos(a) * d, 128 + Math.sin(a) * d, r, 0, Math.PI * 2); g.fill();
   }
-  return canvasTex(c);
+  return c;
 }
 const dotTex = makeDot(), cloudTex = makeCloud();
 
@@ -225,9 +260,33 @@ const starGeo = new THREE.BufferGeometry();
 const starMat = new THREE.PointsMaterial({ size: 2.2 * Math.min(devicePixelRatio, 2), sizeAttenuation: false, map: dotTex, transparent: true, depthWrite: false, fog: false, opacity: 0 });
 const stars = new THREE.Points(starGeo, starMat); stars.renderOrder = -9; stars.frustumCulled = false; scene.add(stars);
 
-// luna
-const moon = new THREE.Mesh(new THREE.SphereGeometry(16, 32, 16), new THREE.MeshBasicMaterial({ map: makeMoon(), fog: false, transparent: true }));
-moon.renderOrder = -8; scene.add(moon);
+// luna con la fase reale
+const moonBase = makeMoon();
+const moonCanvas = document.createElement('canvas'); moonCanvas.width = moonCanvas.height = 256;
+const moonTex = canvasTex(moonCanvas);
+const moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, transparent: true, depthWrite: false }));
+moon.scale.set(34, 34, 1); moon.renderOrder = -8; scene.add(moon);
+let moonIllum = 1, moonPhaseName = '', moonStamp = -1e15;
+const PHASE_NAMES = ['luna nuova', 'luna crescente', 'primo quarto', 'gibbosa crescente', 'luna piena', 'gibbosa calante', 'ultimo quarto', 'luna calante'];
+function moonPhaseAt(date){
+  const syn = 29.530588853, ref = Date.UTC(2000, 0, 6, 18, 14);
+  let p = ((date.getTime() - ref) / 86400000 / syn) % 1; if (p < 0) p += 1; return p;
+}
+function drawMoonPhase(p, southern){
+  const g = moonCanvas.getContext('2d'), R = 126, cx = 128, cy = 128;
+  g.clearRect(0, 0, 256, 256);
+  g.globalAlpha = .09; g.drawImage(moonBase, 0, 0); g.globalAlpha = 1;     // luce cinerea sulla parte in ombra
+  const k = Math.cos(p * Math.PI * 2); let flip = p < .5 ? 1 : -1; if (southern) flip = -flip;
+  const m = document.createElement('canvas'); m.width = m.height = 256; const mg = m.getContext('2d');
+  mg.fillStyle = '#fff'; mg.beginPath();
+  for (let i = 0; i <= 48; i++){ const t = -Math.PI / 2 + i / 48 * Math.PI; mg.lineTo(cx + flip * R * Math.cos(t), cy + R * Math.sin(t)); }
+  for (let i = 0; i <= 48; i++){ const t = Math.PI / 2 - i / 48 * Math.PI; mg.lineTo(cx + flip * k * R * Math.cos(t), cy + R * Math.sin(t)); }
+  mg.closePath(); mg.fill();
+  const l = document.createElement('canvas'); l.width = l.height = 256; const lg = l.getContext('2d');
+  lg.drawImage(moonBase, 0, 0); lg.globalCompositeOperation = 'destination-in'; lg.filter = 'blur(2.5px)'; lg.drawImage(m, 0, 0);
+  g.drawImage(l, 0, 0); moonTex.needsUpdate = true;
+  moonIllum = (1 - k) / 2; moonPhaseName = PHASE_NAMES[Math.floor(p * 8 + .5) % 8];
+}
 const moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: 0xb9c8ff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
 moonGlow.scale.set(150, 150, 1); moonGlow.renderOrder = -8; scene.add(moonGlow);
 
@@ -287,13 +346,16 @@ plaza.position.y = .06; plaza.receiveShadow = true; scene.add(plaza);
 }
 
 /* ===================== alberi ===================== */
-const trees = [];
+const trees = [], LEAF_MATS = [];
+const blossomMat = new THREE.PointsMaterial({ size: .38, map: dotTex, color: 0xff9fc4, transparent: true, depthWrite: false, opacity: 0 });
 {
+  const branchGeo = new THREE.CylinderGeometry(.025, .05, 1, 5); branchGeo.translate(0, .5, 0);
   const trunkGeo = new THREE.CylinderGeometry(.11, .19, 1, 7); trunkGeo.translate(0, .5, 0);
   const coneGeo = new THREE.ConeGeometry(1, 1.7, 9);
   const blobGeo = new THREE.IcosahedronGeometry(1, 1);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3324, roughness: .95 });
   const leafMats = ['#2f5a2a', '#3d6b2e', '#4f7a34', '#2a4d33'].map(c => addSnow(new THREE.MeshStandardMaterial({ color: c, roughness: .9, flatShading: true }), .55));
+  leafMats.forEach(m => { m.userData.base = m.color.clone(); LEAF_MATS.push(m); });
   const pineMat = addSnow(new THREE.MeshStandardMaterial({ color: 0x1f4030, roughness: .9, flatShading: true }), .6);
   for (let i = 0; i < (LOW ? 26 : 46); i++){
     let x, z, d;
@@ -304,12 +366,26 @@ const trees = [];
     if (conifer){
       for (let k = 0; k < 3; k++){ const c = new THREE.Mesh(coneGeo, pineMat); const sc = 1.25 - k * .3; c.scale.set(sc, sc, sc); c.position.y = 1.6 + k * .85; g.add(c); }
     } else {
-      const m = leafMats[(rand() * leafMats.length) | 0];
-      for (let k = 0; k < 4; k++){ const b = new THREE.Mesh(blobGeo, m); const sc = .75 + rand() * .5; b.scale.set(sc, sc * .9, sc); b.position.set((rand() - .5) * 1.1, 2.3 + rand() * .9, (rand() - .5) * 1.1); g.add(b); }
+      const m = leafMats[(rand() * leafMats.length) | 0], blobs = [];
+      for (let k = 0; k < 4; k++){ const b = new THREE.Mesh(blobGeo, m); const sc = .75 + rand() * .5; b.scale.set(sc, sc * .9, sc); b.position.set((rand() - .5) * 1.1, 2.3 + rand() * .9, (rand() - .5) * 1.1); b.userData.s = b.scale.clone(); g.add(b); blobs.push(b); }
+      // rami: si vedono quando l'albero è spoglio
+      for (let k = 0; k < 6; k++){
+        const br = new THREE.Mesh(branchGeo, trunkMat), a = k / 6 * Math.PI * 2 + rand();
+        br.position.y = 1.5 + rand() * .6; br.rotation.set(Math.cos(a) * .75, 0, Math.sin(a) * .75); br.scale.set(1, .9 + rand() * .7, 1); g.add(br);
+      }
+      // fioritura primaverile sulla chioma
+      const bp = new Float32Array(110 * 3);
+      for (let k = 0; k < 110; k++){
+        const b = blobs[k % blobs.length], v = V3(rand() - .5, rand() - .25, rand() - .5).normalize();
+        bp[k * 3] = b.position.x + v.x * b.scale.x; bp[k * 3 + 1] = b.position.y + v.y * b.scale.y; bp[k * 3 + 2] = b.position.z + v.z * b.scale.z;
+      }
+      const bg = new THREE.BufferGeometry(); bg.setAttribute('position', new THREE.BufferAttribute(bp, 3));
+      const bl = new THREE.Points(bg, blossomMat); g.add(bl);
+      g.userData.blobs = blobs;
     }
     g.traverse(o => { if (o.isMesh){ o.castShadow = d < 26; o.receiveShadow = true; } });
     g.scale.setScalar(s); g.position.set(x, heightAt(x, z) - .05, z); g.rotation.y = rand() * 6;
-    g.userData = { ph: rand() * 10, stiff: .6 + rand() * .6 };
+    Object.assign(g.userData, { ph: rand() * 10, stiff: .6 + rand() * .6 });
     scene.add(g); trees.push(g);
   }
 }
@@ -352,6 +428,33 @@ let grass;
   }
   grass.receiveShadow = true; grass.frustumCulled = false; scene.add(grass);
 }
+
+/* ===================== fiori nel prato e foglie che cadono ===================== */
+const FLN = LOW ? 400 : 1300;
+const flowerMat = new THREE.MeshStandardMaterial({ roughness: .7, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+const flowers = new THREE.InstancedMesh(new THREE.CircleGeometry(.055, 6).rotateX(-Math.PI / 2), flowerMat, FLN);
+{
+  const d = new THREE.Object3D(), cols = ['#ffffff', '#ffe066', '#c9a4ff', '#ff9db8', '#ffffff'].map(c => col(c));
+  for (let i = 0; i < FLN; i++){
+    const a = rand() * Math.PI * 2, r = 3.6 + Math.pow(rand(), 1.4) * 24, x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (z > 1.5 && Math.abs(x) < 3.5 + (z - 1.5) * .9){ i--; continue; }
+    d.position.set(x, heightAt(x, z) + .16 + rand() * .12, z); d.rotation.set((rand() - .5) * .4, rand() * 6, (rand() - .5) * .4);
+    d.scale.setScalar(.7 + rand() * .8); d.updateMatrix(); flowers.setMatrixAt(i, d.matrix); flowers.setColorAt(i, cols[(rand() * cols.length) | 0]);
+  }
+}
+flowers.frustumCulled = false; scene.add(flowers);
+
+const LFN = LOW ? 120 : 320;
+const fallLeaves = new THREE.InstancedMesh(new THREE.PlaneGeometry(.09, .06), new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: .8 }), LFN);
+const fallData = [];
+{
+  const cols = ['#c2611f', '#d8962a', '#a83a1c', '#c9a227', '#8a5a1e'].map(c => col(c));
+  for (let i = 0; i < LFN; i++){
+    fallData.push({ x: (rand() - .5) * 26, y: rand() * 9, z: -13 + rand() * 16, s: .6 + rand() * .7, ph: rand() * 10, sp: .45 + rand() * .5 });
+    fallLeaves.setColorAt(i, cols[(rand() * cols.length) | 0]);
+  }
+}
+fallLeaves.count = 0; fallLeaves.frustumCulled = false; scene.add(fallLeaves);
 
 /* ===================== lampione e panchina ===================== */
 const ironMat = new THREE.MeshStandardMaterial({ color: 0x1c1e22, metalness: .7, roughness: .45 });
@@ -435,6 +538,16 @@ const glass = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.Mes
 glass.position.set(0, FACE_Y, .293); clock.add(glass);
 const interiorLight = new THREE.PointLight(0xffc98a, .6, 1.7, 2); interiorLight.position.set(0, HT - .12, .08); clock.add(interiorLight);
 
+// gocce di pioggia che colano + condensa (che l'omino pulisce col panno)
+const GL = 512;
+const glassCanvas = document.createElement('canvas'); glassCanvas.width = glassCanvas.height = GL;
+const gctx = glassCanvas.getContext('2d');
+const fogMask = document.createElement('canvas'); fogMask.width = fogMask.height = GL;
+const mctx = fogMask.getContext('2d');
+const glassTex = canvasTex(glassCanvas);
+const wetGlass = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.MeshStandardMaterial({ map: glassTex, transparent: true, roughness: .12, depthWrite: false, envMapIntensity: 1.3 }));
+wetGlass.position.set(0, FACE_Y, .2958); clock.add(wetGlass);
+
 /* ===================== L'OMINO ===================== */
 const skinMat = new THREE.MeshStandardMaterial({ color: 0xd9a98c, roughness: .55, envMapIntensity: .35 });
 const shirtMat = new THREE.MeshStandardMaterial({ color: 0x34507a, roughness: .85, envMapIntensity: .35 });
@@ -455,7 +568,7 @@ part(new THREE.SphereGeometry(.058, 16, 12), shirtMat, -.165, .49, 0, torso);
 part(new THREE.SphereGeometry(.058, 16, 12), shirtMat, .165, .49, 0, torso);
 
 const head = new THREE.Group(); head.position.set(0, .7, .005); torso.add(head);
-const eyes = [];
+const eyes = []; let mouth;
 {
   part(new THREE.SphereGeometry(.1, 32, 24), skinMat, 0, 0, 0, head).scale.set(.92, 1.08, .98);
   const hair = part(new THREE.SphereGeometry(.105, 32, 16, 0, Math.PI * 2, 0, Math.PI * .55), hairMat, 0, .012, -.006, head); hair.rotation.x = -.3;
@@ -467,7 +580,7 @@ const eyes = [];
   }
   part(new THREE.BoxGeometry(.026, .003, .003), darkMat, 0, .02, .104, head);
   part(new THREE.SphereGeometry(.018, 12, 8), skinMat, 0, -.012, .1, head).scale.set(.8, 1, 1.3);
-  part(new THREE.BoxGeometry(.032, .005, .005), new THREE.MeshStandardMaterial({ color: 0x7a3f33, roughness: .6 }), 0, -.046, .092, head);
+  mouth = part(new THREE.BoxGeometry(.032, .005, .005), new THREE.MeshStandardMaterial({ color: 0x4a2520, roughness: .6 }), 0, -.046, .092, head);
 }
 function makeArm(side){
   const a = {
@@ -492,6 +605,22 @@ const cloth = (() => {
   const m = part(g, new THREE.MeshStandardMaterial({ color: 0xf1ede4, roughness: 1 }), 0, 0, 0); m.scale.set(1.1, 1, .35); return m;
 })();
 
+// mensola interna (in basso a sinistra, quasi nascosta dalla cornice) con tazza di caffè e panno
+part(new THREE.BoxGeometry(.3, .012, .1), brassMat, -.31, 1.6, .17);
+const CUP_HOME = V3(-.38, 1.636, .17), CLOTH_HOME = V3(-.22, 1.62, .17);
+const cup = new THREE.Group(); clock.add(cup);
+{
+  const cupMat = new THREE.MeshStandardMaterial({ color: 0xf3efe6, roughness: .3 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(.03, .023, .06, 24), cupMat); body.castShadow = true; cup.add(body);
+  const coffee = new THREE.Mesh(new THREE.CircleGeometry(.027, 24).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x3b2416, roughness: .2 })); coffee.position.y = .026; cup.add(coffee);
+  const handle = new THREE.Mesh(new THREE.TorusGeometry(.016, .005, 8, 16, Math.PI), cupMat); handle.rotation.z = -Math.PI / 2; handle.position.x = .029; cup.add(handle);
+}
+cup.position.copy(CUP_HOME);
+const steam = [];
+for (let i = 0; i < 6; i++){
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: 0xffffff, transparent: true, depthWrite: false, opacity: 0 }));
+  clock.add(s); steam.push(s);
+}
 function placeLimb(mesh, a, b){
   tmpA.subVectors(b, a); const len = tmpA.length() || 1e-4;
   mesh.position.copy(a).addScaledVector(tmpA, .5);
@@ -560,13 +689,72 @@ function renderFace(){
   faceDirty = fading;
 }
 
+/* ===================== vetro bagnato ===================== */
+const drops = []; let cond = 0, condT = 0, glassAcc = 0, maskAcc = 0, spawnAcc = 0, glassClean = true;
+const GX = x => GL / 2 + x / FACE_R * GL / 2, GY = y => GL / 2 - y / FACE_R * GL / 2;
+function updateGlass(dt){
+  // nuove gocce
+  spawnAcc += (W.rain * 45 + W.storm * 25) * dt;
+  while (spawnAcc >= 1){
+    spawnAcc--;
+    if (drops.length < 260) drops.push({ x: Math.random() * GL, y: Math.random() * GL * .95, r: 1.2 + Math.pow(Math.random(), 2) * 5, vy: 0, wob: Math.random() * 10 });
+  }
+  const slide = windDir.x * W.wind * 1.5;
+  for (let i = drops.length - 1; i >= 0; i--){
+    const d = drops[i];
+    if (d.r > 4.3){
+      d.vy = damp(d.vy, 35 + d.r * 14, 3, dt);
+      d.y += d.vy * dt * (.6 + .4 * Math.sin(simT * 3 + d.wob));
+      d.x += (Math.sin(simT * 2 + d.wob) * 6 + slide) * dt;
+      if (Math.random() < dt * 5 && d.r > 3.5){ drops.push({ x: d.x, y: d.y - d.r, r: d.r * .3, vy: 0, wob: 0 }); d.r -= .05; }
+      mctx.globalCompositeOperation = 'source-over'; mctx.fillStyle = '#000';
+      mctx.beginPath(); mctx.arc(d.x, d.y, d.r * 1.2, 0, Math.PI * 2); mctx.fill();
+      for (let j = 0; j < drops.length; j++){
+        const o = drops[j]; if (o === d || o.r > d.r) continue;
+        const dx = o.x - d.x, dy = o.y - d.y;
+        if (dx * dx + dy * dy < (d.r + o.r) * (d.r + o.r) * .5){ d.r = Math.min(9, Math.sqrt(d.r * d.r + o.r * o.r)); o.r = 0; }
+      }
+    } else if (W.rain < .05){ d.r -= dt * .25; }
+    else if (Math.random() < dt * .3){ d.r += .4; }
+    if (d.r <= .3 || d.y > GL + 10){ drops.splice(i, 1); }
+  }
+  for (let i = drops.length - 1; i >= 0; i--) if (drops[i].r <= 0) drops.splice(i, 1);
+
+  // condensa: fredda e umida, o nebbia
+  condT = clamp(smooth(70, 96, humidity) * smooth(15, 3, tempC) + W.fog * .35 + W.snow * .15, 0, .8);
+  cond = damp(cond, condT, .15, dt);
+  if (rig.mode === 'cloth' || (rig.mode === 'pen' && rig.penK > 20)){
+    const c = rig.mode === 'cloth' ? rig.cloth : rig.penTip, r = rig.mode === 'cloth' ? 30 : 9;
+    mctx.globalCompositeOperation = 'source-over'; mctx.fillStyle = '#000';
+    mctx.beginPath(); mctx.arc(GX(c.x), GY(c.y - FACE_Y), r, 0, Math.PI * 2); mctx.fill();
+  }
+  maskAcc += dt;
+  if (maskAcc > .5){ maskAcc = 0; mctx.globalCompositeOperation = 'destination-out'; mctx.fillStyle = 'rgba(0,0,0,.025)'; mctx.fillRect(0, 0, GL, GL); }
+
+  glassAcc += dt; if (glassAcc < 1 / 30) return; glassAcc = 0;
+  if (!drops.length && cond < .005){ if (!glassClean){ gctx.clearRect(0, 0, GL, GL); glassTex.needsUpdate = true; glassClean = true; } return; }
+  glassClean = false;
+  gctx.globalCompositeOperation = 'source-over'; gctx.clearRect(0, 0, GL, GL);
+  if (cond > .005){
+    gctx.fillStyle = `rgba(222,228,234,${(cond * .7).toFixed(3)})`; gctx.fillRect(0, 0, GL, GL);
+    gctx.globalCompositeOperation = 'destination-out'; gctx.drawImage(fogMask, 0, 0); gctx.globalCompositeOperation = 'source-over';
+  }
+  for (const d of drops){
+    gctx.fillStyle = 'rgba(30,36,44,.2)'; gctx.beginPath(); gctx.ellipse(d.x, d.y, d.r, d.r * 1.12, 0, 0, Math.PI * 2); gctx.fill();
+    gctx.fillStyle = 'rgba(255,255,255,.5)'; gctx.beginPath(); gctx.arc(d.x + d.r * .3, d.y + d.r * .35, d.r * .45, 0, Math.PI * 2); gctx.fill();
+    gctx.fillStyle = 'rgba(255,255,255,.85)'; gctx.beginPath(); gctx.arc(d.x - d.r * .35, d.y - d.r * .4, Math.max(.6, d.r * .22), 0, Math.PI * 2); gctx.fill();
+  }
+  glassTex.needsUpdate = true;
+}
+
 /* ===================== l'omino: compiti (cancella / disegna / attende) ===================== */
 const REST_PEN = V3(.11, 1.58, .12), REST_CLOTH = V3(-.14, 1.53, .05);
 const rig = {
   mode: 'idle', penTip: REST_PEN.clone(), penDesired: V3(), cloth: REST_CLOTH.clone(), clothDesired: V3(),
-  penK: 9, clothK: 9, look: V3(0, FACE_Y, .3)
+  penK: 9, clothK: 9, look: V3(0, FACE_Y, .3),
+  lookOverride: null, cupHeld: false, clothOnShelf: false, cupTilt: 0, yawn: 0, yawnT: 0, cupTiltT: 0, steam: 0
 };
-const state = { minute: null, hour: null, dispMin: -1, dispHour: -1 };
+const state = { minute: null, hour: null, dispMin: -1, dispHour: -1, breakAt: -1 };
 const nowTotal = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
 const tasks = []; let cur = null;
 
@@ -625,10 +813,52 @@ function taskWaitMinute(target){
     }
   };
 }
+// pause dell'omino allo scoccare dell'ora
+function taskCoffee(){
+  const mouthP = V3(), tgt = V3();
+  return {
+    t: 0, start(){},
+    update(dt){
+      const t = this.t += dt; rig.mode = 'coffee'; rig.clothK = 5.5;
+      worldOf(mouth, mouthP);
+      if (t < 1.1){ tgt.copy(CLOTH_HOME); rig.lookOverride = CLOTH_HOME; }
+      else if (t < 2.2){ rig.clothOnShelf = true; tgt.copy(CUP_HOME); rig.lookOverride = CUP_HOME; }
+      else if (t < 3.4){ rig.cupHeld = true; tgt.copy(mouthP).add(tmpB.set(-.01, -.07, .1)); rig.lookOverride = null; }
+      else if (t < 6.6){ tgt.copy(mouthP).add(tmpB.set(0, -.045, .085)); rig.cupTiltT = .65; rig.lookOverride = tmpC.copy(mouthP).add(tmpB.set(0, .3, .6)).clone(); }
+      else if (t < 7.9){ rig.cupTiltT = 0; tgt.copy(CUP_HOME); rig.lookOverride = CUP_HOME; }
+      else if (t < 9.0){ rig.cupHeld = false; tgt.copy(CLOTH_HOME); }
+      else { rig.clothOnShelf = false; tgt.copy(REST_CLOTH); rig.mode = 'idle'; }
+      rig.clothDesired.copy(tgt);
+      rig.steam = rig.cupHeld ? 1 : 0;
+      return t > 9.8;
+    }
+  };
+}
+function taskStretch(){
+  return {
+    t: 0, start(){},
+    update(dt){
+      const t = this.t += dt; rig.mode = 'stretch'; rig.penK = 4; rig.clothK = 4;
+      if (t < 3.6){
+        rig.penDesired.set(.16, 2.42, .0); rig.clothDesired.set(-.16, 2.45, .05);
+        rig.lookOverride = V3(0, 3.6, 1.0);
+        rig.yawnT = t > 1.2 && t < 3.2 ? 1 : 0;
+      } else if (t < 5){
+        rig.penDesired.set(.4, 2.02, .02); rig.clothDesired.set(-.4, 2.02, .06); rig.yawnT = 0;
+      }
+      return t > 6.4;
+    }
+  };
+}
+function pickBreak(){ return Math.random() < .5 ? taskCoffee() : taskStretch(); }
 function schedule(){
   const d = new Date(), tm = d.getHours() * 60 + d.getMinutes(), sec = d.getSeconds() + d.getMilliseconds() / 1000;
   if (!state.minute && !state.hour && state.dispMin < 0){
+    state.breakAt = tm;
     tasks.push(taskDraw('hour', nowTotal), taskDraw('minute', nowTotal)); return;
+  }
+  if (state.dispMin === tm && tm % 60 === 0 && state.breakAt !== tm && sec < 40){
+    state.breakAt = tm; tasks.push(pickBreak()); return;
   }
   const next = (tm + 1) % 1440, needHour = hourQuant(next) !== state.dispHour, lead = needHour ? 12.5 : 6.5;
   if (state.dispMin === tm && sec >= 60 - lead){
@@ -644,6 +874,7 @@ function schedule(){
 }
 function runTasks(dt){
   rig.mode = 'idle'; rig.penDesired.copy(REST_PEN); rig.clothDesired.copy(REST_CLOTH); rig.penK = 6; rig.clothK = 6;
+  rig.lookOverride = null; rig.cupTiltT = 0; rig.yawnT = 0;
   if (!cur){ if (!tasks.length) schedule(); if (tasks.length){ cur = tasks.shift(); cur.start(); } }
   if (cur && cur.update(dt)) cur = null;
 }
@@ -661,12 +892,13 @@ function updateRig(dt){
 
   const act = rig.mode === 'pen' ? rig.penTip : rig.mode === 'cloth' ? rig.cloth : null;
   const tx = act ? clamp(act.x * .5, -.17, .17) : 0;
-  const ty = 1.27 + (act ? clamp((act.y - FACE_Y) * .42, -.12, .11) : 0) + breath;
+  const stretching = rig.mode === 'stretch';
+  const ty = 1.27 + (act ? clamp((act.y - FACE_Y) * .42, -.12, .11) : 0) + breath + (stretching ? .06 : 0);
   torso.position.x = damp(torso.position.x, tx, 3.5, dt);
   torso.position.y = damp(torso.position.y, ty, 3.5, dt);
   torso.position.z = damp(torso.position.z, act ? -.045 : -.07, 3, dt);
   torso.rotation.z = -torso.position.x * .5;
-  torso.rotation.x = damp(torso.rotation.x, act ? .06 + Math.max(0, 1.27 - torso.position.y) * .9 : .02, 3, dt);
+  torso.rotation.x = damp(torso.rotation.x, act ? .06 + Math.max(0, 1.27 - torso.position.y) * .9 : stretching ? -.13 : .02, 3, dt);
   torso.updateMatrixWorld(true);
 
   // braccio destro + pennarello
@@ -683,14 +915,29 @@ function updateRig(dt){
   const wl = V3(rig.cloth.x - .01, rig.cloth.y - .015, rig.cloth.z - .055);
   solveIK(shTmp, wl, L1, L2, poleL, armL.elbowP, armL.wristP);
   applyArm(armL, shTmp);
-  cloth.position.set(armL.wristP.x + .01, armL.wristP.y + .015, armL.wristP.z + .05);
-  cloth.rotation.z = Math.sin(simT * 7) * (rig.mode === 'cloth' ? .25 : .05);
+  if (rig.clothOnShelf){ cloth.position.copy(CLOTH_HOME).add(tmpB.set(0, .005, 0)); cloth.rotation.set(Math.PI / 2, 0, .4); }
+  else {
+    cloth.position.set(armL.wristP.x + .01, armL.wristP.y + .015, armL.wristP.z + .05); cloth.rotation.set(0, 0, Math.sin(simT * 7) * (rig.mode === 'cloth' ? .25 : .05));
+    if (Math.hypot(cloth.position.x, cloth.position.y - FACE_Y) > FACE_R - .055) cloth.position.z = Math.min(cloth.position.z, .25); // non attraversa la cornice
+  }
+  rig.cupTilt = damp(rig.cupTilt, rig.cupTiltT, 3, dt);
+  if (rig.cupHeld){ cup.position.copy(rig.cloth); cup.rotation.set(-rig.cupTilt, 0, 0); }
+  else { cup.position.copy(CUP_HOME); cup.rotation.set(0, 0, 0); }
+  steam.forEach((s, i) => {
+    const ph = (simT * .45 + i / steam.length) % 1;
+    s.position.set(cup.position.x + Math.sin(simT * 2 + i * 1.7) * .012 * ph, cup.position.y + .04 + ph * .14, cup.position.z);
+    s.material.opacity = .22 * Math.sin(ph * Math.PI) * rig.steam * (1 - rig.cupTilt);
+    s.scale.setScalar(.025 + ph * .06);
+  });
+  rig.yawn = damp(rig.yawn, rig.yawnT, 4, dt);
+  mouth.scale.set(1 + rig.yawn * .4, 1 + rig.yawn * 7, 1);
 
   // sguardo
   lookCamT -= dt;
   if (lookCamT <= 0){ lookingCam = !lookingCam; lookCamT = lookingCam ? 2.5 + Math.random() * 2 : 7 + Math.random() * 8; }
   const look = tmpA;
-  if (act) look.copy(act);
+  if (rig.lookOverride) look.copy(rig.lookOverride);
+  else if (act) look.copy(act);
   else if (lookingCam) look.copy(clock.worldToLocal(camera.position.clone()));
   else look.set(0, FACE_Y + .05, .3);
   rig.look.lerp(look, 1 - Math.exp(-dt * 5));
@@ -715,14 +962,14 @@ function applyArm(a, sh){
 const W  = { cloud: .3, rain: 0, snow: 0, fog: 0, storm: 0, wind: 2.5 };
 const WT = { ...W };
 const windDir = new THREE.Vector2(1, 0), windDirT = new THREE.Vector2(1, 0);
-let wet = 0, flash = 0, tempC = 15;
+let wet = 0, flash = 0, tempC = 15, humidity = 60;
 const PRESETS = {
-  sereno:    { cloud: .05, rain: 0, snow: 0, fog: 0, storm: 0, wind: 2 },
-  nuvoloso:  { cloud: .9, rain: 0, snow: 0, fog: 0, storm: 0, wind: 5 },
-  pioggia:   { cloud: .97, rain: .75, snow: 0, fog: .15, storm: 0, wind: 6 },
-  temporale: { cloud: 1, rain: 1, snow: 0, fog: .1, storm: 1, wind: 12 },
-  neve:      { cloud: .92, rain: 0, snow: .85, fog: .1, storm: 0, wind: 3 },
-  nebbia:    { cloud: .6, rain: 0, snow: 0, fog: 1, storm: 0, wind: 1 }
+  sereno:    { cloud: .05, rain: 0, snow: 0, fog: 0, storm: 0, wind: 2, temp: 22, hum: 45 },
+  nuvoloso:  { cloud: .9, rain: 0, snow: 0, fog: 0, storm: 0, wind: 5, temp: 14, hum: 70 },
+  pioggia:   { cloud: .97, rain: .75, snow: 0, fog: .15, storm: 0, wind: 6, temp: 11, hum: 94 },
+  temporale: { cloud: 1, rain: 1, snow: 0, fog: .1, storm: 1, wind: 12, temp: 19, hum: 90 },
+  neve:      { cloud: .92, rain: 0, snow: .85, fog: .1, storm: 0, wind: 3, temp: -2, hum: 92 },
+  nebbia:    { cloud: .6, rain: 0, snow: 0, fog: 1, storm: 0, wind: 1, temp: 5, hum: 99 }
 };
 const PRESET_LABEL = { sereno: 'Sereno', nuvoloso: 'Nuvoloso', pioggia: 'Pioggia', temporale: 'Temporale', neve: 'Neve', nebbia: 'Nebbia' };
 
@@ -836,7 +1083,7 @@ function updateEnvironment(dt){
   // luce principale: sole di giorno, luna di notte
   const p = (((Math.atan2(sunDir.x, -sunDir.z) * 180 / Math.PI) + 360) % 360) / 360; // azimut del sole 0..1
   const np = (p + .5) % 1;
-  moonDir.set(.6 - 1.2 * np, .18 + .32 * Math.sin(np * Math.PI), -1).normalize();
+  moonDir.set(.5 - 1.0 * np, .07 + .14 * Math.sin(np * Math.PI), -1).normalize();
   if (elevDeg > -2){
     key.position.copy(sunDir).multiplyScalar(50).add(key.target.position);
     key.color.copy(sunC);
@@ -844,7 +1091,7 @@ function updateEnvironment(dt){
   } else {
     key.position.copy(moonDir).multiplyScalar(50).add(key.target.position);
     key.color.set(0xa9bcff);
-    key.intensity = .38 * night * (1 - .85 * W.cloud) + flash * 3;
+    key.intensity = .38 * night * (1 - .85 * W.cloud) * (.2 + .8 * moonIllum) + flash * 3;
   }
   lin.copy(sc.top).lerp(sc.hor, .5).convertSRGBToLinear();
   hemi.color.copy(lin);
@@ -860,7 +1107,9 @@ function updateEnvironment(dt){
   sky.position.copy(camera.position);
   const mv = night * (1 - .9 * W.cloud) * (1 - W.fog);
   moon.position.copy(camera.position).addScaledVector(moonDir, 780); moon.material.opacity = mv; moon.visible = mv > .01;
-  moonGlow.position.copy(moon.position); moonGlow.material.opacity = mv * .35; moonGlow.visible = moon.visible;
+  moonGlow.position.copy(moon.position); moonGlow.material.opacity = mv * .35 * (.15 + .85 * moonIllum); moonGlow.visible = moon.visible;
+  const envMs = envNow().getTime();
+  if (Math.abs(envMs - moonStamp) > 30 * 60000){ moonStamp = envMs; drawMoonPhase(moonPhaseAt(envNow()), CONFIG.lat < 0); }
 
   const darkness = Math.max(night, (1 - dayL) * .5, W.storm * .55 * W.cloud, W.fog * .3 * (1 - dayL * .5));
   const lampOn = smooth(.35, .7, darkness);
@@ -879,7 +1128,7 @@ function updateWeatherFX(dt, t){
   windDir.lerp(windDirT, k).normalize();
   snowU.value = damp(snowU.value, W.snow > .2 ? 1 : 0, W.snow > .2 ? .06 : .02, dt);
   wet = damp(wet, W.rain > .1 ? 1 : 0, W.rain > .1 ? .15 : .03, dt);
-  groundMat.roughness = lerp(.95, .55, wet); groundMat.color.setScalar(1 - .22 * wet);
+  groundMat.roughness = lerp(.95, .55, wet);
   plazaMat.roughness = lerp(.85, .18, wet); plazaMat.color.setScalar(1 - .3 * wet);
 
   grassU.uTime.value = t; grassU.uWind.value = W.wind; grassU.uWindDir.value.copy(windDir);
@@ -943,6 +1192,7 @@ function updateWeatherFX(dt, t){
       flash = 1; strikeBolt(); boltT = .22;
       setTimeout(() => { flash = Math.max(flash, .7); }, 110 + Math.random() * 120);
       nextStrike = 3 + Math.random() * 9; envTimer = 0;
+      if (AUD.on){ const delay = .6 + Math.random() * 4; thunder(delay, clamp(1.15 - delay / 5, .3, 1)); }
     }
   }
   boltT -= dt; bolt.material.opacity = boltT > 0 ? 1 : 0;
@@ -971,6 +1221,179 @@ function updateWeatherFX(dt, t){
     u.l.rotation.z = fl; u.r.rotation.z = -fl;
     u.l.material.opacity = bv; b.visible = bv > .02;
   }
+}
+
+/* ===================== stagioni (dalla data, emisfero dalle coordinate) ===================== */
+const SEASON = { bloom: 0, autumn: 0, bare: 0, fall: 0, flowers: 0, fresh: 0, dry: 0, name: '' };
+const SEASON_DOY = { inverno: 20, primavera: 105, estate: 190, autunno: 292 };
+const SEASON_ORDER = ['inverno', 'primavera', 'estate', 'autunno', null];
+let seasonOverride = SEASON_DOY[CONFIG.season] ? CONFIG.season : null, seasonFirst = true;
+const AUTUMN_COLS = ['#c2611f', '#d8962a', '#a83a1c', '#c9a227'].map(c => col(c)), FRESH_GREEN = col('#7cae3c');
+const DRY_TINT = col('#d6b77a'), WHITE = col('#ffffff'), seasonTint = col(0), fallDummy = new THREE.Object3D();
+function dayOfYear(d){ return (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(d.getFullYear(), 0, 0)) / 86400000; }
+function updateSeason(dt, t){
+  let d = seasonOverride ? SEASON_DOY[seasonOverride] : dayOfYear(envNow());
+  if (CONFIG.lat < 0 && !seasonOverride) d = (d + 182) % 365;
+  const T = {
+    bloom: smooth(80, 98, d) * (1 - smooth(122, 142, d)),
+    autumn: smooth(250, 295, d),
+    bare: d >= 300 ? smooth(305, 335, d) : 1 - smooth(82, 108, d),
+    fall: smooth(266, 290, d) * (1 - smooth(328, 345, d)),
+    flowers: smooth(88, 112, d) * (1 - smooth(205, 245, d)),
+    fresh: smooth(92, 110, d) * (1 - smooth(150, 178, d)),
+    dry: 0
+  };
+  T.dry = Math.max(T.autumn * .45, T.bare * .55, smooth(205, 232, d) * (1 - smooth(250, 268, d)) * .25);
+  const k = seasonFirst ? 1 : 1 - Math.exp(-dt * .7); seasonFirst = false;
+  for (const n in T) SEASON[n] += (T[n] - SEASON[n]) * k;
+  SEASON.name = (d < 79 || d >= 355) ? 'Inverno' : d < 172 ? 'Primavera' : d < 266 ? 'Estate' : 'Autunno';
+
+  LEAF_MATS.forEach((m, i) => m.color.copy(m.userData.base).lerp(FRESH_GREEN, SEASON.fresh * .45).lerp(AUTUMN_COLS[i % 4], SEASON.autumn));
+  const canopy = 1 - .9 * SEASON.bare;
+  for (const tr of trees){
+    if (!tr.userData.blobs) continue;
+    for (const b of tr.userData.blobs){ b.scale.copy(b.userData.s).multiplyScalar(canopy); b.visible = canopy > .12; }
+  }
+  blossomMat.opacity = SEASON.bloom * (1 - snowU.value) * .95;
+  flowerMat.opacity = SEASON.flowers * (1 - snowU.value); flowers.visible = flowerMat.opacity > .01;
+  seasonTint.copy(WHITE).lerp(DRY_TINT, SEASON.dry);
+  groundMat.color.copy(seasonTint).multiplyScalar(1 - .22 * wet);
+  grass.material.color.copy(seasonTint);
+
+  // foglie che cadono (di più col vento)
+  const amt = SEASON.fall * (.55 + .45 * clamp(W.wind / 8, 0, 1)) * (1 - W.snow) * canopy;
+  const n = Math.floor(LFN * clamp(amt, 0, 1)); fallLeaves.count = n;
+  if (n > 0){
+    const vx = windDir.x * (.4 + W.wind * .35), vz = windDir.y * (.4 + W.wind * .35);
+    for (let i = 0; i < n; i++){
+      const f = fallData[i];
+      f.y -= f.sp * dt; f.x += (vx + Math.sin(t * 1.4 + f.ph) * .6) * dt; f.z += (vz + Math.cos(t * 1.1 + f.ph) * .3) * dt;
+      if (f.y < .02){ f.y = 6 + Math.random() * 4; f.x = (Math.random() - .5) * 26; f.z = -13 + Math.random() * 16; }
+      if (f.x > 13) f.x -= 26; else if (f.x < -13) f.x += 26;
+      if (f.z > 3) f.z -= 16; else if (f.z < -13) f.z += 16;
+      fallDummy.position.set(f.x, f.y, f.z);
+      fallDummy.rotation.set(t * 2.1 + f.ph, t * 1.3 + f.ph * 2, t * 1.7 + f.ph);
+      fallDummy.scale.setScalar(f.s); fallDummy.updateMatrix(); fallLeaves.setMatrixAt(i, fallDummy.matrix);
+    }
+    fallLeaves.instanceMatrix.needsUpdate = true;
+  }
+}
+
+/* ===================== suoni (sintetizzati, nessun file) ===================== */
+const AUD = { ctx: null, on: false, lastSec: -1, lastChime: -1 };
+function audioInit(){
+  const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+  const ctx = AUD.ctx = new AC();
+  AUD.master = ctx.createGain(); AUD.master.gain.value = 0; AUD.master.connect(ctx.destination);
+  const sr = ctx.sampleRate, nb = ctx.createBuffer(1, sr * 2, sr), nd = nb.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const bb = ctx.createBuffer(1, sr * 6, sr), bd = bb.getChannelData(0); let lastB = 0;
+  for (let i = 0; i < bd.length; i++){ lastB = (lastB + .02 * (Math.random() * 2 - 1)) / 1.02; bd[i] = lastB * 3.5; }
+  AUD.noise = nb; AUD.brown = bb;
+  const loop = (filters, g) => {
+    const src = ctx.createBufferSource(); src.buffer = nb; src.loop = true;
+    let node = src; for (const f of filters){ node.connect(f); node = f; }
+    node.connect(g); g.connect(AUD.master); src.start();
+  };
+  const filt = (type, f, q = .7) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+  AUD.rainG = ctx.createGain(); AUD.rainG.gain.value = 0; loop([filt('highpass', 500), filt('lowpass', 7000)], AUD.rainG);
+  AUD.windF = filt('bandpass', 350, .9); AUD.windG = ctx.createGain(); AUD.windG.gain.value = 0; loop([AUD.windF], AUD.windG);
+  AUD.scratchG = ctx.createGain(); AUD.scratchG.gain.value = 0; loop([filt('bandpass', 2700, 1.6)], AUD.scratchG);
+  AUD.wipeG = ctx.createGain(); AUD.wipeG.gain.value = 0; loop([filt('bandpass', 900, .8)], AUD.wipeG);
+  return true;
+}
+function tick(tock){
+  const ctx = AUD.ctx, t = ctx.currentTime;
+  const src = ctx.createBufferSource(); src.buffer = AUD.noise;
+  const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = tock ? 1700 : 2300; f.Q.value = 6;
+  const g = ctx.createGain(); g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.4, t + .002); g.gain.exponentialRampToValueAtTime(.0001, t + .05);
+  src.connect(f); f.connect(g); g.connect(AUD.master); src.start(t, Math.random() * 1.5, .08);
+  const o = ctx.createOscillator(); o.frequency.value = tock ? 420 : 520;
+  const og = ctx.createGain(); og.gain.setValueAtTime(.05, t); og.gain.exponentialRampToValueAtTime(.0001, t + .09);
+  o.connect(og); og.connect(AUD.master); o.start(t); o.stop(t + .1);
+}
+function thunder(delay, power){
+  const ctx = AUD.ctx, t = ctx.currentTime + delay;
+  const src = ctx.createBufferSource(); src.buffer = AUD.brown;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(250 + 900 * power, t); lp.frequency.exponentialRampToValueAtTime(110, t + 3.5);
+  const g = ctx.createGain(); g.gain.setValueAtTime(.0001, t);
+  g.gain.exponentialRampToValueAtTime(1.3 * power, t + .07); g.gain.exponentialRampToValueAtTime(.55 * power, t + .7);
+  g.gain.exponentialRampToValueAtTime(.0001, t + 5.5);
+  src.connect(lp); lp.connect(g); g.connect(AUD.master); src.start(t); src.stop(t + 6);
+}
+function chime(n){
+  const ctx = AUD.ctx, t0 = ctx.currentTime + .1;
+  for (let i = 0; i < n; i++){
+    const t = t0 + i * 2.1;
+    for (const [m, a, dcy] of [[1, .2, 3.6], [2, .1, 2.3], [2.76, .07, 1.6], [5.4, .035, .9]]){
+      const o = ctx.createOscillator(); o.frequency.value = 196 * m;
+      const g = ctx.createGain(); g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(a, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + dcy);
+      o.connect(g); g.connect(AUD.master); o.start(t); o.stop(t + dcy + .1);
+    }
+  }
+}
+function updateAudio(){
+  if (!AUD.on || AUD.ctx.state !== 'running') return;
+  const t = AUD.ctx.currentTime;
+  AUD.rainG.gain.setTargetAtTime(W.rain * .3 + W.storm * .08, t, .5);
+  AUD.windG.gain.setTargetAtTime(clamp(W.wind / 14, 0, 1) * .22, t, .8);
+  AUD.windF.frequency.setTargetAtTime(240 + W.wind * 25 + Math.sin(simT * .7) * 80, t, .3);
+  const drawing = rig.mode === 'pen' && rig.penK > 20, wiping = rig.mode === 'cloth' && rig.clothK > 20;
+  AUD.scratchG.gain.setTargetAtTime(drawing ? .045 : 0, t, .04);
+  AUD.wipeG.gain.setTargetAtTime(wiping ? .07 * (.6 + .4 * Math.abs(Math.sin(simT * 14))) : 0, t, .03);
+  const d = new Date(), sec = d.getSeconds();
+  if (sec !== AUD.lastSec){ AUD.lastSec = sec; tick(sec % 2 === 1); }
+  if (d.getMinutes() === 0 && sec < 3 && AUD.lastChime !== d.getHours()){ AUD.lastChime = d.getHours(); chime(d.getHours() % 12 || 12); }
+}
+const soundBtn = document.getElementById('sound');
+function setSound(on){
+  if (on && !AUD.ctx && !audioInit()) return;
+  if (!AUD.ctx) return;
+  AUD.on = on;
+  if (on){ AUD.ctx.resume(); AUD.lastChime = new Date().getHours(); }
+  AUD.master.gain.setTargetAtTime(on ? .8 : 0, AUD.ctx.currentTime, .25);
+  soundBtn.setAttribute('aria-pressed', String(on));
+  soundBtn.setAttribute('aria-label', on ? 'Disattiva i suoni' : 'Attiva i suoni');
+  try { localStorage.setItem('tempo-reale-suoni', on ? '1' : '0'); } catch (e) {}
+}
+soundBtn.addEventListener('click', () => setSound(!AUD.on));
+{
+  let want = CONFIG.sound;
+  try { if (localStorage.getItem('tempo-reale-suoni') === '1') want = true; } catch (e) {}
+  if (want){
+    setSound(true);   // in kiosk con --autoplay-policy=no-user-gesture-required parte subito
+    addEventListener('pointerdown', () => { if (AUD.on && AUD.ctx.state !== 'running') AUD.ctx.resume(); }, { once: true });
+  }
+}
+
+/* ===================== post-processing: bloom + profondità di campo ===================== */
+let composer = null, bloomPass = null, bokehPass = null, fxOn = false, fxSlow = 0;
+const FOCUS_P = V3(0, FACE_Y + .12, .3);
+function setupFX(){
+  if (LOW || !THREE.EffectComposer || !THREE.UnrealBloomPass || !THREE.BokehPass || !THREE.GammaCorrectionShader) return;
+  try {
+    const pr = renderer.getPixelRatio();
+    const rt = new THREE.WebGLRenderTarget(innerWidth * pr, innerHeight * pr, { type: THREE.HalfFloatType });
+    composer = new THREE.EffectComposer(renderer, rt);
+    composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    bokehPass = new THREE.BokehPass(scene, camera, { focus: 5, aperture: .00018, maxblur: .0055, width: innerWidth, height: innerHeight });
+    bokehPass.needsSwap = true;
+    // nella mappa di profondità escludo sprite, punti e linee (pioggia e neve vicine diventano morbide)
+    const noDepth = [stars, moon, moonGlow, lampHalo, rain, snowPts, fireflies, bolt, ...clouds, ...steam];
+    const origRender = bokehPass.render.bind(bokehPass);
+    bokehPass.render = (r, w, rd, dt, m) => {
+      const vis = noDepth.map(o => o.visible); noDepth.forEach(o => { o.visible = false; });
+      origRender(r, w, rd, dt, m);
+      noDepth.forEach((o, i) => { o.visible = vis[i]; });
+    };
+    composer.addPass(bokehPass);
+    bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), .5, .55, .8);
+    composer.addPass(bloomPass);
+    composer.addPass(new THREE.ShaderPass(THREE.GammaCorrectionShader));
+    fxOn = CONFIG.fx;
+  } catch (e) { console.warn('Post-processing non disponibile:', e); composer = null; fxOn = false; }
 }
 
 /* ===================== meteo reale (Open-Meteo, nessuna chiave) ===================== */
@@ -1002,13 +1425,13 @@ async function fetchWeather(){
   if (demo) return;
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${CONFIG.lat}&longitude=${CONFIG.lon}` +
-      `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timezone=auto`;
+      `&current=temperature_2m,relative_humidity_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timezone=auto`;
     const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
     const c = (await r.json()).current;
     const [label, p] = wmo(c.weather_code);
     if (c.cloud_cover != null && c.weather_code !== 0) p.cloud = Math.max(p.cloud || 0, c.cloud_cover / 100);
     setTarget(p, c.wind_speed_10m, c.wind_direction_10m);
-    tempC = c.temperature_2m;
+    tempC = c.temperature_2m; if (c.relative_humidity_2m != null) humidity = c.relative_humidity_2m;
     if (first){ Object.assign(W, WT); windDir.copy(windDirT); snowU.value = W.snow > .2 ? 1 : 0; wet = W.rain > .1 ? 1 : 0; first = false; envTimer = 0; }
     $('wTemp').textContent = Math.round(c.temperature_2m) + '°';
     $('wCond').textContent = label;
@@ -1025,7 +1448,9 @@ async function fetchWeather(){
 function setDemo(name){
   demo = name;
   if (!name){ $('wMeta').textContent = ''; first = false; fetchWeather(); return; }
-  setTarget(PRESETS[name], PRESETS[name].wind, 250);
+  const pr = PRESETS[name];
+  setTarget({ cloud: pr.cloud, rain: pr.rain, snow: pr.snow, fog: pr.fog, storm: pr.storm }, pr.wind, 250);
+  tempC = pr.temp; humidity = pr.hum; $('wTemp').textContent = pr.temp + '°';
   $('wCond').textContent = PRESET_LABEL[name] + ' (prova)';
   $('wMeta').textContent = 'Premi 0 per tornare al meteo reale';
 }
@@ -1043,11 +1468,17 @@ const KEYMAP = { '1': 'sereno', '2': 'nuvoloso', '3': 'pioggia', '4': 'temporale
 addEventListener('keydown', e => {
   if (KEYMAP[e.key]) setDemo(KEYMAP[e.key]);
   else if (e.key === '0') setDemo(null);
-  else if (e.key === 'h' || e.key === 'H') hud.classList.toggle('hidden');
+  else if (e.key === 'h' || e.key === 'H') toggleHud();
+  else if (e.key === 's' || e.key === 'S') setSound(!AUD.on);
+  else if (e.key === 'p' || e.key === 'P'){ if (composer){ fxOn = !fxOn; fxSlow = 0; } }
+  else if (e.key === 't' || e.key === 'T'){ const i = SEASON_ORDER.indexOf(seasonOverride); seasonOverride = SEASON_ORDER[(i + 1) % SEASON_ORDER.length]; }
+  else if (e.key === 'b' || e.key === 'B') tasks.push(pickBreak());
   else if (e.key === 'g' || e.key === 'G'){ daySpeed = daySpeed === 1 ? 720 : 1; if (daySpeed === 1) envOffset = 0; }
   else if (e.key === '?') $('help').classList.toggle('show');
 });
-renderer.domElement.addEventListener('pointerup', () => hud.classList.toggle('hidden'));
+function toggleHud(){ const h = hud.classList.toggle('hidden'); soundBtn.classList.toggle('hidden', h); }
+if (!CONFIG.showHud) soundBtn.classList.add('hidden');
+renderer.domElement.addEventListener('pointerup', toggleHud);
 let mx = 0, my = 0;
 addEventListener('pointermove', e => { mx = e.clientX / innerWidth - .5; my = e.clientY / innerHeight - .5; });
 
@@ -1055,6 +1486,7 @@ function onResize(){
   const a = innerWidth / innerHeight;
   camera.aspect = a; camera.fov = a < 1 ? clamp(34 / a * .85, 34, 70) : 34;
   camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+  if (composer) composer.setSize(innerWidth, innerHeight);
 }
 addEventListener('resize', onResize); onResize();
 
@@ -1062,7 +1494,7 @@ addEventListener('resize', onResize); onResize();
 let last = performance.now();
 function frame(now){
   requestAnimationFrame(frame);
-  const dt = Math.min(.1, (now - last) / 1000); last = now; simT += dt;
+  const dt = clamp((now - last) / 1000, 0, .1); last = now; simT += dt;
 
   const sway = REDUCED_MOTION ? 0 : 1;
   camera.position.set(
@@ -1073,11 +1505,30 @@ function frame(now){
 
   updateWeatherFX(dt, simT);
   updateEnvironment(dt);
+  updateSeason(dt, simT);
   runTasks(dt);
   updateRig(dt);
+  updateGlass(dt);
+  updateAudio();
   if (faceDirty) renderFace();
-  renderer.render(scene, camera);
+  skyLine();
+
+  if (fxOn && composer){
+    bokehPass.uniforms.focus.value = camera.position.distanceTo(FOCUS_P);
+    bloomPass.strength = .32 + .5 * night + flash * .8 + W.fog * .15;
+    composer.render(dt);
+    // se l'hardware non regge (sotto ~24 fps per 4 secondi), spengo gli effetti
+    fxSlow = (now - frame.prev) > 42 ? fxSlow + dt : Math.max(0, fxSlow - dt * .5);
+    if (fxSlow > 4){ fxOn = false; console.info('Effetti cinema disattivati: frame rate troppo basso (P per riattivarli)'); }
+  } else renderer.render(scene, camera);
+  frame.prev = now;
 }
+let skyText = '';
+function skyLine(){
+  const txt = `${SEASON.name}, ${moonPhaseName}`;
+  if (txt !== skyText){ skyText = txt; document.getElementById('wSky').textContent = txt; }
+}
+setupFX(); onResize();
 refreshEnv();
 requestAnimationFrame(frame);
 </script>
