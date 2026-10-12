@@ -660,11 +660,14 @@ loadPhoto('hardwood2_diffuse.jpg', { srgb: true }, t => {
     });
     const nrm = normalFromCanvas(c, 2.2);
     const mk = (cv, rep, srgb) => { const x = canvasTex(cv, srgb); x.wrapS = x.wrapT = THREE.MirroredRepeatWrapping; x.repeat.set(rep, rep); return x; };
+    const mkR = (cv, rep, srgb) => { const x = mk(cv, rep, srgb); x.center.set(.5, .5); x.rotation = Math.PI / 2; return x; };
+    woodVertMat.map = mkR(c, 1.5, true); woodVertMat.normalMap = mkR(nrm, 1.5, false); woodVertMat.normalScale = new THREE.Vector2(.8, .8); woodVertMat.color.set(0x3f2416); woodVertMat.needsUpdate = true;
     for (const [m, tint, rep, ns] of [[woodMat, 0x7c4a2e, 1.5, .8], [woodDarkMat, 0x4a2c1c, 1.5, .8], [benchPlank, 0x9a7048, 2.2, 1]]){
       m.map = mk(c, rep, true); m.normalMap = mk(nrm, rep, false); m.normalScale = new THREE.Vector2(ns, ns); m.color.set(tint); m.needsUpdate = true;
     }
   } catch (e) { console.info('Legno fotografico non applicabile: resta quello procedurale.'); }
 });
+const woodVertMat = new THREE.MeshPhysicalMaterial({ map: woodTex, color: 0x8f7766, roughness: .42, clearcoat: .6, clearcoatRoughness: .25 });   // venatura in verticale
 const brassMat = new THREE.MeshStandardMaterial({ color: 0xbf8f35, metalness: 1, roughness: .3, envMapIntensity: .75 });
 const interiorMat = new THREE.MeshStandardMaterial({ color: 0x2e241b, roughness: .9, envMapIntensity: .2 });
 function part(geo, mat, x, y, z, parent = clock){ const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; parent.add(m); return m; }
@@ -683,8 +686,8 @@ box(.94, .05, .64, woodMat, 0, .245, 0);
 // cassa cava, come un vero orologio a colonna: il pendolo oscilla dietro la finestrella tonda della porta
 const WIN_Y = .98, WIN_R = .105, PEND_PIVOT = V3(0, 1.3, .2);
 box(.78, 1.14, .03, interiorMat, 0, .84, -.245);
-box(.04, 1.14, .52, woodMat, -.37, .84, 0);
-box(.04, 1.14, .52, woodMat, .37, .84, 0);
+box(.04, 1.14, .52, woodVertMat, -.37, .84, 0);
+box(.04, 1.14, .52, woodVertMat, .37, .84, 0);
 {
   const ds = new THREE.Shape();
   ds.moveTo(-.35, -.57); ds.lineTo(.35, -.57); ds.lineTo(.35, .57); ds.lineTo(-.35, .57); ds.closePath();
@@ -710,8 +713,8 @@ const pend = new THREE.Group(); pend.position.copy(PEND_PIVOT); clock.add(pend);
 const pendLight = new THREE.PointLight(0xffc98a, .35, 1.1, 2); pendLight.position.set(0, WIN_Y + .05, .1); clock.add(pendLight);
 box(.94, .06, .62, woodDarkMat, 0, 1.44, 0);
 box(HW, HH, .03, interiorMat, 0, FACE_Y, -.295);
-box(.04, HH, HD, woodMat, -.48, FACE_Y, 0);
-box(.04, HH, HD, woodMat, .48, FACE_Y, 0);
+box(.04, HH, HD, woodVertMat, -.48, FACE_Y, 0);
+box(.04, HH, HD, woodVertMat, .48, FACE_Y, 0);
 box(HW, .04, HD, woodMat, 0, HT - .02, 0);
 box(HW, .04, HD, interiorMat, 0, HB + .02, 0);
 {
@@ -726,7 +729,7 @@ box(HW, .04, HD, interiorMat, 0, HB + .02, 0);
     part(new THREE.SphereGeometry(.014, 12, 8), brassMat, sx * .4, FACE_Y + sy * .42, .328);
   }
   for (const sx of [-1, 1]){
-    part(new THREE.CylinderGeometry(.028, .028, HH, 16), woodDarkMat, sx * .52, FACE_Y, .3);
+    part(new THREE.CylinderGeometry(.028, .028, HH, 16), woodVertMat, sx * .52, FACE_Y, .3);
     part(new THREE.SphereGeometry(.036, 16, 10), brassMat, sx * .52, HT + .01, .3);
     part(new THREE.SphereGeometry(.036, 16, 10), brassMat, sx * .52, HB - .01, .3);
   }
@@ -746,6 +749,13 @@ const ink = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.MeshS
 ink.position.set(0, FACE_Y, .288); clock.add(ink);
 const glass = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 96), new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: .03, metalness: 0, transparent: true, opacity: .1, clearcoat: 1, envMapIntensity: 1.6, depthWrite: false }));
 glass.position.set(0, FACE_Y, .293); clock.add(glass);
+glass.material.envMapIntensity = 1.1;
+// riflesso di una finestra/cielo: due fasce diagonali morbide, visibili solo con luce diurna e cielo non coperto
+const glareMat = new THREE.MeshBasicMaterial({ map: (() => {
+  const c = newCanvas(256), g = c.getContext('2d'); g.translate(128, 128); g.rotate(-.6);
+  for (const [x, w, a] of [[-26, 34, .5], [38, 14, .35]]){ const k = g.createLinearGradient(x - w, 0, x + w, 0); k.addColorStop(0, 'rgba(255,255,255,0)'); k.addColorStop(.5, `rgba(255,255,255,${a})`); k.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = k; g.fillRect(x - w, -300, w * 2, 600); }
+  return canvasTex(c); })(), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0, fog: false });
+const glare = new THREE.Mesh(new THREE.CircleGeometry(FACE_R, 64), glareMat); glare.position.set(0, FACE_Y, .2945); clock.add(glare);
 const interiorLight = new THREE.PointLight(0xffc98a, .6, 1.7, 2); interiorLight.position.set(0, HT - .12, .08); clock.add(interiorLight);
 
 /* ===================== occlusione ambientale: ombre di contatto morbide sotto ogni oggetto ===================== */
@@ -1005,6 +1015,11 @@ function setupHuman(root, name){
   root.updateMatrixWorld(true);
   HUMAN.base.copy(root.position); HUMAN.root = root;
   for (const b of Object.values(B)) if (b) HUMAN.rest.set(b, b.quaternion.clone());
+  HUMAN.fingers = [];
+  for (const h of [B.haR, B.haL]) h.traverse(o => {
+    const m = /(thumb|index|middle|ring|pinky)([1-3])$/.exec(o.name.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    if (o.isBone && m) HUMAN.fingers.push({ bone: o, rest: o.quaternion.clone(), hand: h === B.haR ? 'R' : 'L', thumb: m[1] === 'thumb', j: +m[2], left: /left/i.test(o.name) });
+  });
   HUMAN.L1 = B.upR.getWorldPosition(V3()).distanceTo(B.foR.getWorldPosition(V3()));
   HUMAN.L2 = B.foR.getWorldPosition(V3()).distanceTo(B.haR.getWorldPosition(V3()));
   // nascondo l'omino geometrico (pennarello, panno e tazza restano)
@@ -1015,11 +1030,20 @@ function setupHuman(root, name){
   console.info(`Personaggio "${name}" caricato.`);
   return true;
 }
+// dita: mano destra che stringe il pennarello, sinistra rilassata (si chiudono un po' a ogni falange)
+function curlFingers(){
+  for (const f of HUMAN.fingers){
+    const grip = f.hand === 'R' ? (rig.mode === 'pen' ? .95 : .6) : (rig.mode === 'stretch' ? .05 : .4);
+    const a = grip * (f.thumb ? .45 : [.55, .85, .6][f.j - 1]) * (f.left ? -1 : 1);
+    f.bone.quaternion.copy(f.rest).multiply(_q1.setFromAxisAngle(f.thumb ? _v2.set(0, 1, 0) : _v2.set(0, 0, 1), a));
+  }
+}
 function poseHuman(){
   const B = HUMAN.B;
   for (const [b, q] of HUMAN.rest) b.quaternion.copy(q);
   HUMAN.root.position.set(HUMAN.base.x + torso.position.x, HUMAN.base.y + torso.position.y - 1.27, HUMAN.base.z + torso.position.z + .07);
   HUMAN.root.updateMatrixWorld(true);
+  curlFingers();
   if (B.spine) rotateBoneWorld(B.spine, _q1.setFromEuler(_e.set(torso.rotation.x, 0, torso.rotation.z)));
 }
 function armHuman(up, fo, ha, elbowL, wristL, aimL){
@@ -1513,6 +1537,7 @@ function updateEnvironment(dt){
   const lampOn = smooth(.35, .7, darkness);
   lampLight.intensity = lampOn * 2.4; lanternGlass.emissiveIntensity = lampOn * 1.1;
   lampHalo.material.opacity = lampOn * (.45 + W.fog * .4 + W.rain * .2); lampHalo.scale.setScalar(1.4 + W.fog * 2.5);
+  glareMat.opacity = .38 * dayL * (1 - .85 * W.cloud) * (1 - W.fog) * (1 - W.rain * .7);
   interiorLight.intensity = .75 + .9 * night + .3 * W.storm;
 
   envTimer -= dt;
