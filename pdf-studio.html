@@ -147,6 +147,7 @@ dialog .df{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8
   <button class="tb icon" id="bSide" data-ic="side" title="Mostra/nascondi miniature"></button>
   <div class="docname" id="docname">Nessun documento</div>
   <button class="tb" id="bOpen" data-ic="open" title="Apri PDF o immagini (Ctrl+O)"><span>Apri</span></button>
+ <button class="tb" id="bConv" data-ic="conv" title="Converti un file (Word, Markdown, CSV, HTML, testo…) in PDF"><span>Converti</span></button>
   <button class="tb" id="bMerge" data-ic="merge" title="Unisci altri PDF/immagini al documento"><span>Unisci</span></button>
   <button class="tb" id="bPrint" data-ic="print" title="Stampa"><span>Stampa</span></button>
   <button class="tb primary" id="bSave" data-ic="save" title="Salva PDF modificato (Ctrl+S)"><span>Salva</span></button>
@@ -225,10 +226,10 @@ dialog .df{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8
     <div class="drop" id="drop">
       <div class="big">📄</div>
       <h1>PDF Studio Pro</h1>
-      <p>Trascina qui un PDF o un'immagine, oppure scegli un file dal tuo dispositivo.<br>Tutto avviene nel browser: i tuoi file non vengono mai caricati online.</p>
+      <p>Trascina qui un PDF oppure un file da convertire (Word .docx, Markdown, CSV, HTML, testo, JSON, immagini).<br>Tutto avviene nel browser: i tuoi file non vengono mai caricati online.</p>
       <div class="row">
         <button class="tb primary" id="eOpen" data-ic="open"><span>Apri PDF…</span></button>
-        <button class="tb" id="eImg" data-ic="image" style="border-color:var(--line)"><span>Crea PDF da immagini</span></button>
+        <button class="tb" id="eConv" data-ic="conv" style="border-color:var(--line)"><span>Converti file in PDF…</span></button>
         <button class="tb" id="eSample" data-ic="blank" style="border-color:var(--line)"><span>Documento di prova</span></button>
       </div>
       <div class="feat">
@@ -237,6 +238,7 @@ dialog .df{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8
         <div><b>Organizza</b>ruota, riordina, elimina, estrai, unisci</div>
         <div><b>Oscura</b>rimozione reale del contenuto</div>
         <div><b>Cerca</b>ricerca nel testo e selezione/copia</div>
+        <div><b>Converti</b>DOCX, MD, CSV, HTML, TXT, JSON, immagini → PDF</div>
         <div><b>Salva e stampa</b>esporta un PDF standard</div>
       </div>
     </div>
@@ -254,6 +256,7 @@ dialog .df{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8
 <input type="file" id="fMerge" accept="application/pdf,.pdf,image/*" multiple hidden>
 <input type="file" id="fImgPdf" accept="image/*" multiple hidden>
 <input type="file" id="fImg" accept="image/*" hidden>
+<input type="file" id="fConv" multiple hidden>
 
 <dialog id="dSign">
   <div class="dh">Firma</div>
@@ -311,6 +314,7 @@ const ICONS = {
   image:'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', sign:'M3 16c3-8 5-8 6-3s3 3 5-2 3 0 7-1M3 21h18',
   rotl:'M4 9a8 8 0 1 1-1 6M4 4v5h5', rotr:'M20 9a8 8 0 1 0 1 6M20 4v5h-5',
   trash:'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', dup:'M8 8h12v12H8zM4 16V4h12',
+  conv:'M4 4h8v8H4zM12 12h8v8h-8zM15 7h5M17.5 4.5L20 7l-2.5 2.5M9 17H4M6.5 14.5L4 17l2.5 2.5',
   blank:'M6 3h9l4 4v14H6zM12 11v6M9 14h6', extract:'M12 3v12M7 10l5 5 5-5M4 20h16',
   undo:'M9 7H4v5M4 12c2-4 6-6 10-5s6 5 5 9', redo:'M15 7h5v5M20 12c-2-4-6-6-10-5s-6 5-5 9',
   plus:'M12 5v14M5 12h14', minus:'M5 12h14', up:'M6 15l6-6 6 6', down:'M6 9l6 6 6-6',
@@ -412,6 +416,247 @@ async function imageFileToPdf(file){
   return doc.save();
 }
 
+
+/* ---------- conversione di file in PDF (testo, Markdown, CSV, HTML, JSON, DOCX…) ---------- */
+const CONV_EXT = ['txt','log','md','markdown','csv','tsv','json','html','htm','xml','docx','yml','yaml','ini','cfg','conf','js','ts','css','py','java','c','cpp','h','sh','sql'];
+const CONV_ACCEPT = 'application/pdf,.pdf,image/*,' + CONV_EXT.map(e => '.' + e).join(',');
+const extOf = n => (n.split('.').pop() || '').toLowerCase();
+const isPdfFile = f => f.type === 'application/pdf' || extOf(f.name) === 'pdf';
+const isImgFile = f => f.type.startsWith('image/') || /^(png|jpe?g|webp|gif|bmp|avif)$/.test(extOf(f.name));
+const escHtml = t => t.replace(/[&<>]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]));
+
+async function fileToPdfBytes(f){
+  if (isPdfFile(f)) return new Uint8Array(await f.arrayBuffer());
+  if (isImgFile(f)) return imageFileToPdf(f);
+  const ext = extOf(f.name);
+  if (ext === 'docx') return docxToPdf(f);
+  if (CONV_EXT.includes(ext) || f.type.startsWith('text/')){
+    let text = await f.text(), html;
+    if (ext === 'md' || ext === 'markdown') html = mdToHtml(text);
+    else if (ext === 'html' || ext === 'htm') html = text;
+    else if (ext === 'csv' || ext === 'tsv') html = csvToHtml(text, ext === 'tsv' ? '\t' : null);
+    else {
+      if (ext === 'json'){ try { text = JSON.stringify(JSON.parse(text), null, 2); } catch {} }
+      html = '<pre>' + escHtml(text) + '</pre>';
+    }
+    return htmlToPdf(html, f.name);
+  }
+  throw new Error(`Formato non supportato: ${f.name}`);
+}
+
+async function docxToPdf(f){
+  if (!window.mammoth){
+    const urls = ['https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js'];
+    for (const u of urls){
+      try { await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = u; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); }); if (window.mammoth) break; } catch {}
+    }
+    if (!window.mammoth) throw new Error('Convertitore DOCX non disponibile (serve la connessione a internet)');
+  }
+  const r = await mammoth.convertToHtml({ arrayBuffer: await f.arrayBuffer() });
+  return htmlToPdf(r.value, f.name);
+}
+
+function csvToHtml(text, delim){
+  if (!delim){ const l = text.split('\n')[0] || ''; const c = { ',':(l.match(/,/g)||[]).length, ';':(l.match(/;/g)||[]).length, '\t':(l.match(/\t/g)||[]).length }; delim = Object.keys(c).sort((a,b) => c[b]-c[a])[0]; }
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++){
+    const ch = text[i];
+    if (q){ if (ch === '"'){ if (text[i+1] === '"'){ cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === delim){ row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r'){ if (ch === '\r' && text[i+1] === '\n') i++; row.push(cell); cell = ''; if (row.some(x => x !== '') || row.length > 1) rows.push(row); row = []; }
+    else cell += ch;
+  }
+  row.push(cell); if (row.some(x => x !== '')) rows.push(row);
+  return '<table>' + rows.map((r, k) => '<tr>' + r.map(c => `<${k?'td':'th'}>${escHtml(c)}</${k?'td':'th'}>`).join('') + '</tr>').join('') + '</table>';
+}
+
+function mdToHtml(md){
+  const inl = t => escHtml(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (m, a, b) => `<b>${a||b}</b>`)
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>').replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, '$1<i>$2</i>').replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, '$1');
+  const L = md.replace(/\r/g, '').split('\n'), out = []; let i = 0;
+  const isBlock = l => /^(#{1,6}\s|```|>|\s*([-*+]|\d+\.)\s|\s*(-{3,}|\*{3,}|_{3,})\s*$|\|)/.test(l);
+  while (i < L.length){
+    const l = L[i];
+    if (!l.trim()){ i++; continue; }
+    if (/^```/.test(l)){ const b = []; i++; while (i < L.length && !/^```/.test(L[i])) b.push(L[i++]); i++; out.push('<pre>' + escHtml(b.join('\n')) + '</pre>'); continue; }
+    let m;
+    if ((m = l.match(/^(#{1,6})\s+(.*)/))){ out.push(`<h${m[1].length}>${inl(m[2])}</h${m[1].length}>`); i++; continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)){ out.push('<hr>'); i++; continue; }
+    if (/^>/.test(l)){ const b = []; while (i < L.length && /^>/.test(L[i])) b.push(L[i++].replace(/^>\s?/, '')); out.push('<blockquote><p>' + inl(b.join(' ')) + '</p></blockquote>'); continue; }
+    if (/^\|/.test(l) && /^\|?\s*:?-{2,}/.test(L[i+1] || '')){
+      const cells = r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim()); const h = cells(l); i += 2; const rows = [];
+      while (i < L.length && /^\|/.test(L[i])) rows.push(cells(L[i++]));
+      out.push('<table><tr>' + h.map(c => `<th>${inl(c)}</th>`).join('') + '</tr>' + rows.map(r => '<tr>' + r.map(c => `<td>${inl(c)}</td>`).join('') + '</tr>').join('') + '</table>'); continue;
+    }
+    if ((m = l.match(/^(\s*)([-*+]|\d+\.)\s+(.*)/))){
+      const stack = [];
+      while (i < L.length && (m = L[i].match(/^(\s*)([-*+]|\d+\.)\s+(.*)/))){
+        const ind = m[1].length, tag = /\d/.test(m[2]) ? 'ol' : 'ul';
+        while (stack.length && ind < stack[stack.length-1].ind){ out.push(`</${stack.pop().tag}>`); }
+        if (stack.length && ind === stack[stack.length-1].ind && stack[stack.length-1].tag !== tag){ out.push(`</${stack.pop().tag}>`); }
+        if (!stack.length || ind > stack[stack.length-1].ind){ stack.push({ ind, tag }); out.push(`<${tag}>`); }
+        out.push(`<li>${inl(m[3])}</li>`); i++;
+      }
+      while (stack.length) out.push(`</${stack.pop().tag}>`); continue;
+    }
+    const b = []; while (i < L.length && L[i].trim() && (b.length === 0 || !isBlock(L[i]))) b.push(L[i++].trim());
+    out.push('<p>' + inl(b.join(' ')) + '</p>');
+  }
+  return out.join('\n');
+}
+
+/* Motore di impaginazione HTML → PDF (testo vero, selezionabile) con pdf-lib */
+async function htmlToPdf(html, title){
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const dom = new DOMParser().parseFromString(html, 'text/html');
+  const doc = await PDFDocument.create();
+  const F = {}; for (const [k, v] of Object.entries({ r:'Helvetica', b:'HelveticaBold', i:'HelveticaOblique', bi:'HelveticaBoldOblique', m:'Courier', mb:'CourierBold' })) F[k] = await doc.embedFont(StandardFonts[v]);
+  const cs = new Set(F.r.getCharacterSet());
+  const clean = t => [...t.replace(/[‘’“”–—…\t •]/g, c => ({ '•':'*', ...SUBST }[c]))].map(ch => cs.has(ch.codePointAt(0)) ? ch : (/[̀-ͯ​-‏﻿]/.test(ch) ? '' : '?')).join('');
+  const wide = [...dom.querySelectorAll('tr')].some(tr => tr.children.length > 7);
+  const PW = wide ? 841.89 : 595.28, PH = wide ? 595.28 : 841.89, M = 54, CW = PW - 2*M;
+  let page, y; const newPage = () => { page = doc.addPage([PW, PH]); y = PH - M; }; newPage();
+  const need = h => { if (y - h < M && y < PH - M) newPage(); };
+  const SKIP = new Set(['script','style','head','title','meta','link','noscript','template']);
+  const BLOCK = new Set(['p','div','section','article','header','footer','main','nav','aside','ul','ol','li','dl','dt','dd','table','pre','blockquote','hr','h1','h2','h3','h4','h5','h6','figure','figcaption','form','fieldset','address','details','summary','center','body','html']);
+  const fontFor = r => r.m ? (r.b ? F.mb : F.m) : (r.b && r.i ? F.bi : r.b ? F.b : r.i ? F.i : F.r);
+
+  function inlineNode(c, st, runs){
+    if (c.nodeType === 3){ runs.push({ t:c.textContent, ...st }); return; }
+    if (c.nodeType !== 1) return;
+    const tag = c.tagName.toLowerCase();
+    if (tag === 'br'){ runs.push({ t:'\n', ...st }); return; }
+    if (SKIP.has(tag) || tag === 'img') return;
+    const ns = { ...st };
+    if (/^(b|strong|th|h[1-6])$/.test(tag)) ns.b = true;
+    if (/^(i|em|cite|dfn)$/.test(tag)) ns.i = true;
+    if (/^(code|kbd|samp|tt)$/.test(tag)) ns.m = true;
+    c.childNodes.forEach(k => inlineNode(k, ns, runs));
+  }
+
+  async function para(runs, o){
+    const size = o.size || 11, ind = o.indent || 0, x0 = M + ind, w = CW - ind, lh = size * 1.35;
+    const toks = [];
+    for (const r of runs){
+      const f = fontFor(r);
+      if (r.t === '\n'){ toks.push({ nl:true }); continue; }
+      for (const seg of clean(r.t.replace(/\s+/g, ' ')).split(/( )/)){
+        if (!seg) continue;
+        toks.push(seg === ' ' ? { sp:true, font:f, w:f.widthOfTextAtSize(' ', size) } : { s:seg, font:f, w:f.widthOfTextAtSize(seg, size) });
+      }
+    }
+    const lines = []; let cur = [], cw = 0;
+    const push = () => { while (cur.length && cur[cur.length-1].sp) cur.pop(); lines.push(cur); cur = []; cw = 0; };
+    for (let t of toks){
+      if (t.nl){ push(); continue; }
+      if (t.sp){ if (cur.length){ cur.push(t); cw += t.w; } continue; }
+      if (cw + t.w > w && cur.length) push();
+      while (t.w > w && t.s.length > 1){
+        let k = t.s.length - 1; while (k > 1 && t.font.widthOfTextAtSize(t.s.slice(0,k), size) > w) k--;
+        const head = t.s.slice(0,k); cur.push({ ...t, s:head, w:t.font.widthOfTextAtSize(head, size) }); push();
+        const tail = t.s.slice(k); t = { ...t, s:tail, w:t.font.widthOfTextAtSize(tail, size) };
+      }
+      cur.push(t); cw += t.w;
+    }
+    if (cur.length) push();
+    while (lines.length && !lines[lines.length-1].length) lines.pop();
+    if (!lines.length) return;
+    if (y < PH - M) y -= (o.before || 0);
+    lines.forEach((ln, k) => {
+      need(lh);
+      if (k === 0 && o.bullet){ const bf = F.r; page.drawText(o.bullet === '•' ? '-' : o.bullet, { x:x0 - 4 - bf.widthOfTextAtSize(o.bullet === '•' ? '-' : o.bullet, size), y:y - size, size, font:bf, color:rgb(.1,.1,.1) }); }
+      let x = x0;
+      for (const t of ln){ if (!t.sp) page.drawText(t.s, { x, y:y - size, size, font:t.font, color:rgb(.1,.1,.12) }); x += t.w; }
+      y -= lh;
+    });
+    y -= (o.after ?? 6);
+  }
+
+  function preBlock(text, ctx){
+    const size = 9.5, lh = size * 1.3, w = CW - ctx.indent, cpl = Math.max(8, Math.floor(w / (size * .6)));
+    for (const raw of text.replace(/\r/g, '').replace(/\n$/, '').split('\n')){
+      const line = clean(raw.replace(/\t/g, '    '));
+      for (let k = 0; k === 0 || k < line.length; k += cpl){ need(lh); const ch = line.slice(k, k + cpl); if (ch) page.drawText(ch, { x:M + ctx.indent, y:y - size, size, font:F.m, color:rgb(.15,.15,.2) }); y -= lh; }
+    }
+    y -= 8;
+  }
+
+  function table(el, ctx){
+    const rows = [...el.querySelectorAll('tr')].map(tr => [...tr.children].filter(td => /^t[dh]$/i.test(td.tagName)).map(td => ({ t:clean(td.textContent.replace(/\s+/g, ' ').trim()), th:td.tagName === 'TH' }))).filter(r => r.length);
+    if (!rows.length) return;
+    const n = Math.max(...rows.map(r => r.length)), avail = CW - ctx.indent, size = 9, lh = size * 1.3;
+    const wt = Array.from({ length:n }, (_, c) => Math.max(4, ...rows.map(r => Math.min((r[c]?.t.length || 0), 40) + 4)));
+    const sum = wt.reduce((a, b) => a + b, 0), cw = wt.map(v => v / sum * avail);
+    for (const r of rows){
+      const cells = r.map((c, k) => ({ c, lines:wrapLines(c.t, c.th ? F.b : F.r, size, cw[k] - 8) }));
+      const h = Math.max(...cells.map(c => c.lines.length), 1) * lh + 6;
+      need(h); let x = M + ctx.indent;
+      cells.forEach((cell, k) => {
+        page.drawRectangle({ x, y:y - h, width:cw[k], height:h, borderColor:rgb(.6,.6,.65), borderWidth:.5, color:cell.c.th ? rgb(.92,.92,.95) : undefined });
+        cell.lines.forEach((ln, j) => { if (ln) page.drawText(ln, { x:x + 4, y:y - 3 - size - j*lh + 1, size, font:cell.c.th ? F.b : F.r, color:rgb(.1,.1,.12) }); });
+        x += cw[k];
+      });
+      y -= h;
+    }
+    y -= 10;
+  }
+
+  async function image(src, ctx){
+    if (!src || !src.startsWith('data:image/')) return;
+    try {
+      let u = src; if (!/^data:image\/(png|jpeg)/.test(u)) u = (await normalizeImage(u)).url;
+      const im = u.startsWith('data:image/png') ? await doc.embedPng(dataUrlBytes(u)) : await doc.embedJpg(dataUrlBytes(u));
+      let w = im.width * .75, h = im.height * .75; const f = Math.min(1, (CW - ctx.indent) / w, (PH - 2*M) / h); w *= f; h *= f;
+      need(h); page.drawImage(im, { x:M + ctx.indent, y:y - h, width:w, height:h }); y -= h + 8;
+    } catch {}
+  }
+
+  async function walk(el, ctx){
+    let runs = [];
+    const flush = async (extra = {}) => {
+      if (runs.some(r => r.t.trim() || r.t === '\n')){ const c = { ...ctx, ...extra }; await para(runs, c); if (ctx.bullet) ctx.bullet = null; }
+      runs = [];
+    };
+    for (const c of el.childNodes){
+      if (c.nodeType === 3){ runs.push({ t:c.textContent, ...ctx.st }); continue; }
+      if (c.nodeType !== 1) continue;
+      const tag = c.tagName.toLowerCase();
+      if (SKIP.has(tag)) continue;
+      if (tag === 'img'){ await flush(); await image(c.getAttribute('src'), ctx); continue; }
+      if (!BLOCK.has(tag)){ inlineNode(c, ctx.st, runs); continue; }
+      await flush();
+      const n = /^h([1-6])$/.exec(tag);
+      if (n){ const r = []; inlineNode(c, { ...ctx.st, b:true }, r); await para(r, { ...ctx, size:[22,18,15,13,12,11][n[1]-1], before:n[1] < 3 ? 12 : 8, after:5, bullet:null }); }
+      else if (tag === 'p'){
+        if (c.querySelector('img,table,ul,ol,pre')) await walk(c, ctx);
+        else { const r = []; c.childNodes.forEach(k => inlineNode(k, ctx.st, r)); await para(r, { ...ctx, after:7 }); if (ctx.bullet) ctx.bullet = null; }
+      }
+      else if (tag === 'ul' || tag === 'ol'){
+        let k = 0; const nested = { ...ctx, listed:true };
+        for (const li of c.children){
+          const lt = li.tagName.toLowerCase();
+          if (lt === 'li'){ k++; await walk(li, { ...nested, indent:nested.indent + 18, bullet:tag === 'ol' ? k + '.' : '•' }); }
+          else if (lt === 'ul' || lt === 'ol'){ const w = document.createElement('div'); w.appendChild(li.cloneNode(true)); await walk(w, { ...nested, indent:nested.indent + 18 }); }
+        }
+        y -= 3;
+      }
+      else if (tag === 'pre') preBlock(c.textContent, ctx);
+      else if (tag === 'hr'){ need(14); y -= 6; page.drawLine({ start:{ x:M, y }, end:{ x:PW - M, y }, thickness:.6, color:rgb(.6,.6,.65) }); y -= 8; }
+      else if (tag === 'table') table(c, ctx);
+      else if (tag === 'blockquote') await walk(c, { ...ctx, indent:ctx.indent + 18, st:{ ...ctx.st, i:true } });
+      else if (tag === 'dd') await walk(c, { ...ctx, indent:ctx.indent + 18 });
+      else if (tag === 'dt'){ const r = []; inlineNode(c, { ...ctx.st, b:true }, r); await para(r, { ...ctx, after:2 }); }
+      else await walk(c, ctx);
+    }
+    await flush();
+  }
+
+  await walk(dom.body, { indent:0, st:{}, bullet:null });
+  doc.setTitle(title.replace(/\.[^.]+$/, '')); doc.setProducer('PDF Studio Pro');
+  return doc.save();
+}
+
 async function openFiles(fileList, append){
   const files = [...fileList]; if (!files.length) return;
   busy(true, 'Apertura in corso…'); await nextFrame();
@@ -419,14 +664,14 @@ async function openFiles(fileList, append){
     const added = [];
     const firstSrc = S.sources.length;
     for (const f of files){
-      const isImg = f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(f.name);
-      const bytes = isImg ? await imageFileToPdf(f) : new Uint8Array(await f.arrayBuffer());
+      if (!isPdfFile(f)){ $('#busyMsg').textContent = 'Conversione di ' + f.name + '…'; await nextFrame(); }
+      const bytes = await fileToPdfBytes(f);
       const si = await addSource(bytes, f.name);
       for (let k = 0; k < S.sources[si].bases.length; k++) added.push({ src:si, idx:k, rot:0, annots:[] });
     }
     if (!append){
       S.pages = []; S.cur = 0; S.sel.clear(); thumbCache.clear(); textCache.clear();
-      S.name = files[0].name.replace(/\.(png|jpe?g|webp|gif|bmp|avif)$/i, '.pdf');
+      S.name = isPdfFile(files[0]) ? files[0].name : files[0].name.replace(/\.[^.]+$/, '') + '.pdf';
       S.hist = []; S.hi = -1; S.search = { q:'', hits:[], i:-1 }; $('#hitcount').textContent='';
       // libera sorgenti precedenti
       for (let i = 0; i < firstSrc; i++){ try{ S.sources[i].doc.destroy(); }catch{} S.sources[i].doc = null; S.sources[i].bytes = null; }
@@ -436,7 +681,8 @@ async function openFiles(fileList, append){
     if (!append || S.hi < 0) { S.hist=[snapshot()]; S.hi=0; } else commit();
     S.dirty = append;
     await rebuild();
-    toast(append ? `Aggiunte ${added.length} pagine` : `Aperto: ${S.name} — ${S.pages.length} pagine`);
+    const pl = n => n + (n === 1 ? ' pagina' : ' pagine');
+    toast(append ? `Aggiunte ${pl(added.length)}` : `Aperto: ${S.name} — ${pl(S.pages.length)}`);
   } catch(e){ console.error(e); toast(e.message || 'Impossibile aprire il file', 4500); }
   finally { busy(false); }
 }
@@ -1190,7 +1436,9 @@ pick($('#fOpen'), false); pick($('#fMerge'), true);
 $('#fImgPdf').onchange = e => { const f = e.target.files; openFiles(f, S.pages.length > 0); e.target.value = ''; };
 $('#bOpen').onclick = $('#eOpen').onclick = () => $('#fOpen').click();
 $('#bMerge').onclick = () => $('#fMerge').click();
-$('#eImg').onclick = () => $('#fImgPdf').click();
+$('#bConv').onclick = $('#eConv').onclick = () => $('#fConv').click();
+$('#fConv').onchange = e => { const f = e.target.files; openFiles(f, S.pages.length > 0); e.target.value = ''; };
+['#fOpen','#fMerge','#fConv','#fImgPdf'].forEach(x => $(x).accept = CONV_ACCEPT);
 $('#eSample').onclick = makeSample;
 $('#bSave').onclick = savePdf; $('#bPrint').onclick = printPdf;
 $('#bUndo').onclick = () => { endEdit(); restore(-1); }; $('#bRedo').onclick = () => { endEdit(); restore(1); };
