@@ -89,6 +89,11 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
 <script>
 "use strict";
+function fatal(msg){
+  document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;inset:0;display:grid;place-items:center;padding:24px;text-align:center;background:#0c0e14;color:#f4ecdc;font:300 18px/1.5 Georgia,serif">' + msg + '</div>');
+  throw new Error(msg);
+}
+if (typeof THREE === 'undefined') fatal('Non riesco a caricare three.js.<br>Controlla la connessione e ricarica la pagina.');
 /* =====================================================================
    CONFIGURAZIONE  (tutto modificabile anche da URL, es. ?lat=45.6&lon=9.37&hud=0&q=low)
    ===================================================================== */
@@ -131,7 +136,9 @@ const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const col = h => new THREE.Color(h);
 
 /* ===================== renderer / scena ===================== */
-const renderer = new THREE.WebGLRenderer({ antialias: !LOW, powerPreference: 'high-performance' });
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ antialias: !LOW, powerPreference: 'high-performance' }); }
+catch (e) { fatal('Il tuo browser non supporta WebGL.<br>Prova ad aggiornarlo o ad attivare l\'accelerazione hardware.'); }
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, LOW ? 1 : 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
@@ -1569,13 +1576,14 @@ function setTarget(p, windMs, windFromDeg){
   if (windMs != null) WT.wind = windMs;
   if (windFromDeg != null){ const a = (windFromDeg + 180) * Math.PI / 180; windDirT.set(Math.sin(a), -Math.cos(a)); }
 }
-let first = true;
+let first = true, retryTimer = 0;
 async function fetchWeather(){
   if (demo) return;
+  clearTimeout(retryTimer);
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${CONFIG.lat}&longitude=${CONFIG.lon}` +
       `&current=temperature_2m,relative_humidity_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timezone=auto`;
-    const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
+    const r = await fetch(url, { signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined }); if (!r.ok) throw new Error('HTTP ' + r.status);
     const c = (await r.json()).current;
     const [label, p] = wmo(c.weather_code);
     if (c.cloud_cover != null && c.weather_code !== 0) p.cloud = Math.max(p.cloud || 0, c.cloud_cover / 100);
@@ -1591,7 +1599,7 @@ async function fetchWeather(){
   } catch (e) {
     $('wCond').textContent = 'Meteo non raggiungibile';
     $('wMeta').textContent = 'Riprovo tra un minuto. Controlla la connessione.';
-    setTimeout(fetchWeather, 60000);
+    retryTimer = setTimeout(fetchWeather, 60000);
   }
 }
 function setDemo(name){
@@ -1615,6 +1623,7 @@ if (CONFIG.useGeolocation && navigator.geolocation){
 /* ===================== input ===================== */
 const KEYMAP = { '1': 'sereno', '2': 'nuvoloso', '3': 'pioggia', '4': 'temporale', '5': 'neve', '6': 'nebbia' };
 addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (KEYMAP[e.key]) setDemo(KEYMAP[e.key]);
   else if (e.key === '0') setDemo(null);
   else if (e.key === 'h' || e.key === 'H') toggleHud();
@@ -1641,6 +1650,7 @@ addEventListener('resize', onResize); onResize();
 
 /* ===================== ciclo principale ===================== */
 let last = performance.now();
+document.addEventListener('visibilitychange', () => { last = performance.now(); frame.prev = last; });
 function frame(now){
   requestAnimationFrame(frame);
   const dt = clamp((now - last) / 1000, 0, .1); last = now; simT += dt;
