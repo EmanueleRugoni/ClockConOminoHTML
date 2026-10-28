@@ -45,6 +45,14 @@
   .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; justify-content: center; }
   .tools button { padding: 8px 14px; }
   .hint { text-align: center; color: #777; font-size: 12px; margin: 14px 8px 0; }
+  select { background: var(--btn); color: var(--text); border: 0; border-radius: 4px; padding: 8px 10px; font: 600 13px inherit; font-family: inherit; width: 100%; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .pair .swatch { height: 110px; }
+  .cap { font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; text-transform: uppercase; letter-spacing: .06em; }
+  .de { margin: 12px 0 0; padding: 8px 10px; border-radius: 6px; background: #2b2b2b; font: 13px ui-monospace, Consolas, monospace; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .de b { font-size: 16px; }
+  .refbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .drop canvas { outline: 2px dashed var(--accent); outline-offset: 4px; }
   .check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 </style>
 </head>
@@ -52,8 +60,21 @@
 <h1>Spectral Reflectance Editor</h1>
 <div class="app">
   <section class="panel" aria-label="Colore">
-    <div class="swatch" id="swatch"></div>
+    <div class="pair">
+      <div><div class="swatch" id="refSwatch"></div><div class="cap">Reference</div></div>
+      <div><div class="swatch" id="swatch"></div><div class="cap">Current</div></div>
+    </div>
     <div class="readout"><span id="hex">#------</span><span id="xyz">XYZ</span></div>
+    <div class="de"><span>&Delta;E<sub>00</sub> <b id="de">0.00</b></span><span id="deTxt"></span></div>
+    <div class="refbtns"><button id="setRef">Set reference</button><button id="useRef">Reference &rarr; curve</button></div>
+
+    <label for="illum">Illuminant</label>
+    <select id="illum">
+      <option value="D65">D65 &ndash; daylight 6504 K</option>
+      <option value="D50">D50 &ndash; horizon 5003 K (Planckian approx.)</option>
+      <option value="A">A &ndash; incandescent 2856 K</option>
+      <option value="E">E &ndash; equal energy</option>
+    </select>
 
     <label for="sL">L* (Lightness): <span id="vL"></span></label>
     <input type="range" id="sL" min="0" max="100" step="1" value="50">
@@ -75,26 +96,49 @@
       <button id="smooth">Smooth</button>
       <button id="reset">Reset 50%</button>
       <button id="csv">Export CSV</button>
-      <label class="check"><input type="checkbox" id="snap"> Snap 5%</label>
+      <button id="import">Import CSV</button>
+      <input type="file" id="file" accept=".csv,.txt,.tsv" hidden>
     </div>
-    <p class="hint">Draw with the mouse (or finger) to modify the curve. Note: blues near 400nm often appear slightly violet due to sRGB limitations.</p>
+    <div class="tools">
+      <label class="check"><input type="checkbox" id="snap"> Snap 5%</label>
+      <label class="check"><input type="checkbox" id="spline" checked> Spline curve</label>
+      <label class="check">Step <select id="step" style="width:auto;padding:4px 8px"><option value="10">10 nm</option><option value="5">5 nm</option></select></label>
+    </div>
+    <p class="hint">Draw with the mouse (or finger) to modify the curve. You can also drop a CSV file (wavelength, reflectance) onto the chart. Note: blues near 400nm often appear slightly violet due to sRGB limitations.</p>
   </section>
 </div>
 
 <script>
 (() => {
   'use strict';
-  // ---------- Colorimetry (CIE 1931 2°, D65, 400–700 nm @ 10 nm) ----------
-  const N = 31, WL = Array.from({length: N}, (_, i) => 400 + i * 10);
-  const D65 = [82.75,91.49,93.43,86.68,104.86,117.01,117.81,114.86,115.92,108.81,109.35,107.80,104.79,107.69,104.41,104.05,100.00,96.33,95.79,88.69,90.01,89.60,87.70,83.29,83.70,80.03,80.21,82.28,78.28,69.72,71.61];
+  // ---------- Colorimetry (CIE 1931 2°, 400–700 nm, variable step) ----------
+  const D65T = [82.75,91.49,93.43,86.68,104.86,117.01,117.81,114.86,115.92,108.81,109.35,107.80,104.79,107.69,104.41,104.05,100.00,96.33,95.79,88.69,90.01,89.60,87.70,83.29,83.70,80.03,80.21,82.28,78.28,69.72,71.61];
+  const lerpTable = (t, l) => { const x = (l - 400) / 10, i = Math.min(t.length - 2, Math.floor(x)); return t[i] + (t[i + 1] - t[i]) * (x - i); };
+  const planck = T => l => { const m = l * 1e-9; return 1 / (m ** 5 * (Math.exp(1.4388e-2 / (m * T)) - 1)); };
+  const ILLUM = { D65: l => lerpTable(D65T, l), D50: planck(5003), A: planck(2856), E: () => 1 };
   const g = (l, m, s1, s2) => { const t = (l - m) / (l < m ? s1 : s2); return Math.exp(-0.5 * t * t); };
   // Wyman, Sloan & Shirley (2013) multi-lobe fit of the CIE 1931 CMFs
   const xb = l => 1.056 * g(l,599.8,37.9,31.0) + 0.362 * g(l,442.0,16.0,26.7) - 0.065 * g(l,501.1,20.4,26.2);
   const yb = l => 0.821 * g(l,568.8,46.9,40.5) + 0.286 * g(l,530.9,16.3,31.1);
   const zb = l => 1.217 * g(l,437.0,11.8,36.0) + 0.681 * g(l,459.0,26.0,13.8);
-  const W = WL.map((l, i) => [xb(l) * D65[i], yb(l) * D65[i], zb(l) * D65[i]]);
-  const k = 100 / W.reduce((s, w) => s + w[1], 0);
-  const WHITE = W.reduce((s, w) => [s[0] + w[0] * k, s[1] + w[1] * k, s[2] + w[2] * k], [0, 0, 0]);
+
+  let STEP = 10, N, WL, W, k, WHITE, stripRGB, illumName = 'D65';
+  const D65_WHITE = [95.047, 100, 108.883];
+  const BRAD = [[0.8951,0.2664,-0.1614],[-0.7502,1.7135,0.0367],[0.0389,-0.0685,1.0296]];
+  const BRADI = [[0.9869929,-0.1470543,0.1599627],[0.4323053,0.5183603,0.0492912],[-0.0085287,0.0400428,0.9684867]];
+  const mul = (M, v) => M.map(r => r[0]*v[0] + r[1]*v[1] + r[2]*v[2]);
+  function adaptToD65(xyz) { // Bradford adaptation from the current illuminant white to D65 for sRGB display
+    const s = mul(BRAD, WHITE), d = mul(BRAD, D65_WHITE), c = mul(BRAD, xyz);
+    return mul(BRADI, c.map((v, i) => v * d[i] / s[i]));
+  }
+  function buildGrid() {
+    N = 300 / STEP + 1; WL = Array.from({length: N}, (_, i) => 400 + i * STEP);
+    const S = ILLUM[illumName];
+    W = WL.map(l => [xb(l) * S(l), yb(l) * S(l), zb(l) * S(l)]);
+    k = 100 / W.reduce((s, w) => s + w[1], 0);
+    WHITE = W.reduce((s, w) => [s[0] + w[0] * k, s[1] + w[1] * k, s[2] + w[2] * k], [0, 0, 0]);
+    stripRGB = WL.map(l => xyzToRGB([xb(l) * 90, yb(l) * 90, zb(l) * 90], true));
+  }
 
   const toXYZ = R => R.reduce((s, r, i) => [s[0] + r * W[i][0] * k, s[1] + r * W[i][1] * k, s[2] + r * W[i][2] * k], [0, 0, 0]);
   const f = t => t > 216/24389 ? Math.cbrt(t) : (24389/27 * t + 16) / 116;
@@ -104,18 +148,55 @@
     return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
   };
   const toLab = R => xyzToLab(toXYZ(R));
+  const labToXYZ = ([L, a, b]) => { const fy = (L + 16) / 116; return [fi(fy + a / 500) * WHITE[0], fi(fy) * WHITE[1], fi(fy - b / 200) * WHITE[2]]; };
   const gam = c => { c = Math.min(1, Math.max(0, c)); return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1/2.4) - 0.055; };
-  const xyzToRGB = ([X, Y, Z]) => {
+  function xyzToRGB(xyz, noAdapt) {
+    let [X, Y, Z] = noAdapt ? xyz : adaptToD65(xyz);
     X /= 100; Y /= 100; Z /= 100;
     return [3.2406*X - 1.5372*Y - 0.4986*Z, -0.9689*X + 1.8758*Y + 0.0415*Z, 0.0557*X - 0.2040*Y + 1.0570*Z].map(c => Math.round(gam(c) * 255));
-  };
+  }
   const hex = rgb => '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+
+  // CIEDE2000 (Sharma et al. 2005)
+  function deltaE00(l1, l2) {
+    const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+    const [L1, a1, b1] = l1, [L2, a2, b2] = l2;
+    const C1 = Math.hypot(a1, b1), C2 = Math.hypot(a2, b2), Cm = (C1 + C2) / 2;
+    const G = 0.5 * (1 - Math.sqrt(Cm ** 7 / (Cm ** 7 + 25 ** 7)));
+    const ap1 = (1 + G) * a1, ap2 = (1 + G) * a2;
+    const Cp1 = Math.hypot(ap1, b1), Cp2 = Math.hypot(ap2, b2);
+    const hp = (b, a) => (b === 0 && a === 0) ? 0 : (deg(Math.atan2(b, a)) + 360) % 360;
+    const h1 = hp(b1, ap1), h2 = hp(b2, ap2);
+    const dL = L2 - L1, dC = Cp2 - Cp1;
+    let dh = 0;
+    if (Cp1 * Cp2 !== 0) { dh = h2 - h1; if (dh > 180) dh -= 360; else if (dh < -180) dh += 360; }
+    const dH = 2 * Math.sqrt(Cp1 * Cp2) * Math.sin(rad(dh / 2));
+    const Lm = (L1 + L2) / 2, Cpm = (Cp1 + Cp2) / 2;
+    let hm = h1 + h2;
+    if (Cp1 * Cp2 === 0) hm = h1 + h2;
+    else if (Math.abs(h1 - h2) <= 180) hm /= 2;
+    else hm = (h1 + h2 < 360) ? (hm + 360) / 2 : (hm - 360) / 2;
+    const T = 1 - 0.17 * Math.cos(rad(hm - 30)) + 0.24 * Math.cos(rad(2 * hm)) + 0.32 * Math.cos(rad(3 * hm + 6)) - 0.20 * Math.cos(rad(4 * hm - 63));
+    const dTh = 30 * Math.exp(-(((hm - 275) / 25) ** 2));
+    const Rc = 2 * Math.sqrt(Cpm ** 7 / (Cpm ** 7 + 25 ** 7));
+    const Sl = 1 + 0.015 * (Lm - 50) ** 2 / Math.sqrt(20 + (Lm - 50) ** 2);
+    const Sc = 1 + 0.045 * Cpm, Sh = 1 + 0.015 * Cpm * T;
+    const Rt = -Math.sin(rad(2 * dTh)) * Rc;
+    return Math.sqrt((dL / Sl) ** 2 + (dC / Sc) ** 2 + (dH / Sh) ** 2 + Rt * (dC / Sc) * (dH / Sh));
+  }
 
   // ---------- State ----------
   const clamp01 = v => Math.min(1, Math.max(0, v));
+  buildGrid();
   let R = new Array(N).fill(0.5);
+  let refR = null; // reference spectrum: keeps its colour consistent when the illuminant changes
   const history = [];
-  const pushHistory = () => { history.push(R.slice()); if (history.length > 50) history.shift(); };
+  const pushHistory = () => { history.push({step: STEP, R: R.slice()}); if (history.length > 50) history.shift(); };
+  const resample = (arr, oldWL) => WL.map(l => { // linear interpolation onto the current grid
+    const x = Math.min(oldWL.length - 1, Math.max(0, (l - oldWL[0]) / (oldWL[1] - oldWL[0])));
+    const i = Math.min(oldWL.length - 2, Math.floor(x));
+    return arr[i] + (arr[i + 1] - arr[i]) * (x - i);
+  });
 
   // ---------- Lab -> spectrum (Gauss-Newton on a smooth cosine basis) ----------
   const BASIS = 6;
@@ -178,9 +259,19 @@
   const yOf = v => PAD.t + (1 - v) * ph();
   const fmt = v => v.toFixed(1).replace('.', ',');
 
-  // Draw a visible-spectrum colour strip along the x-axis
-  const stripRGB = WL.map(l => { const w = l; // simple monochromatic approx via CMFs
-    return xyzToRGB([xb(w) * 100 * 0.9, yb(w) * 100 * 0.9, zb(w) * 100 * 0.9]); });
+  // Polyline or Catmull-Rom spline (display only: colorimetry always uses the sampled points)
+  function curvePath(closed) {
+    const P = R.map((v, i) => [xOf(i), yOf(v)]), sp = $('spline').checked;
+    ctx.beginPath();
+    if (closed) { ctx.moveTo(P[0][0], yOf(0)); ctx.lineTo(P[0][0], P[0][1]); } else ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 0; i < N - 1; i++) {
+      if (!sp) { ctx.lineTo(P[i + 1][0], P[i + 1][1]); continue; }
+      const p0 = P[Math.max(0, i - 1)], p1 = P[i], p2 = P[i + 1], p3 = P[Math.min(N - 1, i + 2)];
+      const cl = y => Math.min(yOf(0), Math.max(yOf(1), y));
+      ctx.bezierCurveTo(p1[0] + (p2[0] - p0[0]) / 6, cl(p1[1] + (p2[1] - p0[1]) / 6), p2[0] - (p3[0] - p1[0]) / 6, cl(p2[1] - (p3[1] - p1[1]) / 6), p2[0], p2[1]);
+    }
+    if (closed) { ctx.lineTo(P[N - 1][0], yOf(0)); ctx.closePath(); }
+  }
 
   function draw(hover) {
     const w = cv.width, h = cv.height;
@@ -198,7 +289,7 @@
     for (let i = 0; i < N; i++) {
       const x = Math.round(xOf(i)) + .5;
       ctx.strokeStyle = '#3c3c3c'; ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, PAD.t + ph()); ctx.stroke();
-      if (i % 2 === 0) {
+      if (WL[i] % 20 === 0) {
         ctx.save(); ctx.translate(x, PAD.t + ph() + 10); ctx.rotate(-Math.PI / 4);
         ctx.textAlign = 'right'; ctx.fillStyle = '#8a8a8a'; ctx.fillText(WL[i], 0, 0); ctx.restore();
       }
@@ -209,16 +300,13 @@
       ctx.fillStyle = `rgb(${stripRGB[i].join(',')})`; ctx.fillRect(x0, h - 8, x1 - x0 + 1, 4);
     }
     // filled area
-    ctx.beginPath(); ctx.moveTo(xOf(0), yOf(0));
-    R.forEach((v, i) => ctx.lineTo(xOf(i), yOf(v)));
-    ctx.lineTo(xOf(N - 1), yOf(0)); ctx.closePath();
+    curvePath(true);
     ctx.fillStyle = 'rgba(47,107,255,.14)'; ctx.fill();
     // curve
-    ctx.beginPath(); R.forEach((v, i) => i ? ctx.lineTo(xOf(i), yOf(v)) : ctx.moveTo(xOf(i), yOf(v)));
-    ctx.strokeStyle = '#2f6bff'; ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.stroke();
+    curvePath(); ctx.strokeStyle = '#2f6bff'; ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.stroke();
     // points
     R.forEach((v, i) => {
-      ctx.beginPath(); ctx.arc(xOf(i), yOf(v), i === hover ? 6 : 4.5, 0, 7);
+      ctx.beginPath(); ctx.arc(xOf(i), yOf(v), i === hover ? 6 : (N > 40 ? 3 : 4.5), 0, 7);
       ctx.fillStyle = i === hover ? '#fff' : '#1a1a1a'; ctx.fill();
       ctx.strokeStyle = '#2f6bff'; ctx.lineWidth = 2; ctx.stroke();
     });
@@ -236,6 +324,7 @@
   }
 
   let syncingSliders = false;
+  const refOnGrid = () => refR && resample(refR.R, refR.WL);
   function updateColor(fromSliders) {
     const xyz = toXYZ(R), lab = xyzToLab(xyz), rgb = xyzToRGB(xyz);
     $('swatch').style.background = hex(rgb);
@@ -249,6 +338,13 @@
     $('vL').textContent = Math.round(lab[0]);
     $('va').textContent = Math.round(lab[1]);
     $('vb').textContent = Math.round(lab[2]);
+    const rs = refOnGrid(); // reference is re-evaluated under the current illuminant
+    if (rs) {
+      const rx = toXYZ(rs), de = deltaE00(xyzToLab(rx), lab);
+      $('refSwatch').style.background = hex(xyzToRGB(rx));
+      $('de').textContent = de.toFixed(2);
+      $('deTxt').textContent = de < 1 ? 'imperceptible' : de < 2 ? 'barely perceptible' : de < 5 ? 'noticeable' : 'clearly different';
+    }
   }
   const refresh = (fromSliders, hover) => { draw(hover); updateColor(fromSliders); };
 
@@ -295,7 +391,11 @@
     b.onclick = () => setSpectrum(WL.map(fn));
     $('presets').appendChild(b);
   });
-  $('undo').onclick = () => { if (history.length) { R = history.pop(); refresh(false); } };
+  $('undo').onclick = () => {
+    const h = history.pop(); if (!h) return;
+    if (h.step !== STEP) { STEP = h.step; $('step').value = STEP; buildGrid(); }
+    R = h.R; refresh(false);
+  };
   $('reset').onclick = () => setSpectrum(new Array(N).fill(0.5));
   $('smooth').onclick = () => setSpectrum(R.map((v, i) => (R[Math.max(0, i - 1)] + 2 * v + R[Math.min(N - 1, i + 1)]) / 4));
   $('csv').onclick = () => {
@@ -304,11 +404,49 @@
     a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'})); a.download = 'spectrum.csv'; a.click();
     URL.revokeObjectURL(a.href);
   };
+  // Reference colour
+  const setRef = () => { refR = {WL: WL.slice(), R: R.slice()}; refresh(false); };
+  $('setRef').onclick = setRef;
+  $('useRef').onclick = () => { if (refR) setSpectrum(refOnGrid()); };
+
+  // Illuminant & wavelength step
+  $('illum').onchange = e => { illumName = e.target.value; buildGrid(); refresh(false); };
+  $('step').onchange = e => {
+    pushHistory(); const oldWL = WL.slice(); STEP = +e.target.value; buildGrid();
+    R = resample(R, oldWL); refresh(false);
+  };
+  $('spline').onchange = () => draw();
+
+  // CSV import (header optional; , ; tab separators; decimal comma; % or 0–1 values)
+  function importText(text) {
+    const pts = text.split(/\r?\n/).map(l => {
+      const parts = /[;\t]/.test(l) ? l.split(/[;\t]/) : l.includes(',') && l.split(',').length === 2 ? l.split(',') : l.trim().split(/\s+/);
+      return parts.slice(0, 2).map(v => parseFloat(v.replace(',', '.')));
+    }).filter(p => p.length === 2 && p.every(Number.isFinite) && p[0] >= 300 && p[0] <= 1000).sort((a, b) => a[0] - b[0]);
+    if (pts.length < 2) { alert('No valid "wavelength, reflectance" rows found.'); return; }
+    const scale = Math.max(...pts.map(p => p[1])) > 1.5 ? 100 : 1;
+    const at = l => {
+      if (l <= pts[0][0]) return pts[0][1];
+      if (l >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+      let i = pts.findIndex(p => p[0] >= l); const a = pts[i - 1], b = pts[i];
+      return a[1] + (b[1] - a[1]) * (l - a[0]) / (b[0] - a[0] || 1);
+    };
+    setSpectrum(WL.map(l => at(l) / scale));
+  }
+  const readFile = file => file && file.text().then(importText);
+  $('import').onclick = () => $('file').click();
+  $('file').onchange = e => { readFile(e.target.files[0]); e.target.value = ''; };
+  const wrap = document.querySelector('.plot-wrap');
+  ['dragenter', 'dragover'].forEach(ev => wrap.addEventListener(ev, e => { e.preventDefault(); wrap.classList.add('drop'); }));
+  ['dragleave', 'drop'].forEach(ev => wrap.addEventListener(ev, e => { e.preventDefault(); wrap.classList.remove('drop'); }));
+  wrap.addEventListener('drop', e => readFile(e.dataTransfer.files[0]));
+
   window.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); $('undo').click(); } });
 
   // Start from the colour shown in the reference (L*76 a*7 b*5)
   sL.value = 76; sa.value = 7; sb.value = 5;
   onLab();
+  setRef();
 })();
 </script>
 </body>
